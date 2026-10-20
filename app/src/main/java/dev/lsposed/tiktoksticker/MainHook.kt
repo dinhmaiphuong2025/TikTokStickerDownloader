@@ -58,14 +58,6 @@ class MainHook : IXposedHookLoadPackage {
             "com.zhiliaoapp.musically"       // TikTok Quốc tế
         )
 
-        // Các package Telegram family (ưu tiên Nekogram vì người dùng đang dùng)
-        private val TELEGRAM_PACKAGES = listOf(
-            "tw.nekomimi.nekogram",   // Nekogram
-            "org.telegram.messenger", // Telegram chính thức
-            "org.telegram.plus",      // Plus Messenger
-            "nekox.messenger"         // NekoX
-        )
-
         // Bộ nhớ đệm WeakHashMap để tránh memory leak
         private val viewToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
         private val controllerToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
@@ -408,13 +400,14 @@ class MainHook : IXposedHookLoadPackage {
                 currentSheet = TikTokBottomSheet(
                     activity = activity,
                     previewBitmap = previewBitmap,
-                    onDownloadOriginal = {
-                        executeDownloadOriginal(activity, url)
+                    onSaveWebm = { updateStatus, onFinish ->
+                        executeSaveWebm(activity, url, updateStatus, onFinish)
                     },
-                    onShareTelegramGif = { updateStatus ->
-                        executeShareTelegramGif(activity, url, updateStatus) {
-                            currentSheet?.dismiss()
-                        }
+                    onSaveOriginalWebp = {
+                        executeSaveOriginalWebp(activity, url)
+                    },
+                    onSaveGif = { updateStatus, onFinish ->
+                        executeSaveGif(activity, url, updateStatus, onFinish)
                     },
                     onCopyUrl = {
                         copyUrlToClipboard(activity, url)
@@ -448,10 +441,61 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Tải sticker gốc và lưu kèm bản GIF động (dùng được trên Telegram)
+     * 1. Lưu Video Sticker Telegram (.webm VP9 512px)
      */
-    private fun executeDownloadOriginal(activity: Activity, url: String) {
-        showToast(activity, "Đang tải sticker...")
+    private fun executeSaveWebm(
+        activity: Activity,
+        url: String,
+        updateStatus: (String) -> Unit,
+        onFinish: () -> Unit
+    ) {
+        Thread {
+            runCatching {
+                updateStatus("Đang tải dữ liệu sticker...")
+                val bytes = fetchUrlBytes(url) ?: run {
+                    showToast(activity, "Không thể tải sticker từ CDN")
+                    activity.runOnUiThread { onFinish() }
+                    return@Thread
+                }
+
+                updateStatus("Đang convert sang WebM VP9 512px...")
+                val targetDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "TikTokStickers"
+                )
+                if (!targetDir.exists()) targetDir.mkdirs()
+
+                val baseName = "sticker_${System.currentTimeMillis()}"
+                val webmFile = File(targetDir, "$baseName.webm")
+                val cl = appClassLoader ?: activity.classLoader
+
+                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, webmFile, cl)
+                if (ok && webmFile.exists() && webmFile.length() > 500) {
+                    MediaScannerConnection.scanFile(
+                        activity,
+                        arrayOf(webmFile.absolutePath),
+                        arrayOf("video/webm"),
+                        null
+                    )
+                    showToast(activity, "Đã lưu Video Sticker: ${webmFile.name}")
+                } else {
+                    webmFile.delete()
+                    showToast(activity, "Không thể convert sang WebM, vui lòng lưu WebP gốc")
+                }
+                activity.runOnUiThread { onFinish() }
+            }.onFailure { err ->
+                log("Error saving WebM: ${err.message}")
+                showToast(activity, "Lỗi: ${err.localizedMessage}")
+                activity.runOnUiThread { onFinish() }
+            }
+        }.start()
+    }
+
+    /**
+     * 2. Lưu Sticker gốc (.webp)
+     */
+    private fun executeSaveOriginalWebp(activity: Activity, url: String) {
+        showToast(activity, "Đang tải sticker gốc...")
 
         Thread {
             runCatching {
@@ -475,40 +519,13 @@ class MainHook : IXposedHookLoadPackage {
                 )
                 if (!targetDir.exists()) targetDir.mkdirs()
 
-                val baseName = "sticker_${System.currentTimeMillis()}"
+                val destFile = File(targetDir, "sticker_${System.currentTimeMillis()}.$ext")
+                destFile.writeBytes(bytes)
 
-                // 1. Lưu file gốc
-                val originalFile = File(targetDir, "$baseName.$ext")
-                originalFile.writeBytes(bytes)
+                val mime = if (ext == "gif") "image/gif" else "image/webp"
+                MediaScannerConnection.scanFile(activity, arrayOf(destFile.absolutePath), arrayOf(mime), null)
 
-                val savedFiles = mutableListOf(originalFile.absolutePath)
-
-                // 2. Nếu là Animated WebP, chuyển thêm bản GIF động (Telegram-ready)
-                if (isAnimatedWebp) {
-                    val gifFile = File(targetDir, "$baseName.gif")
-                    val cl = appClassLoader ?: activity.classLoader
-                    val ok = WebpToGifConverter.convertWebpToGif(bytes, gifFile, cl)
-                    if (ok && gifFile.length() > 100) {
-                        savedFiles.add(gifFile.absolutePath)
-                        log("Saved Telegram-ready GIF: ${gifFile.name} (${gifFile.length()} bytes)")
-                    } else {
-                        gifFile.delete()
-                        log("GIF conversion produced invalid output, keeping only original")
-                    }
-                }
-
-                // Quét vào thư viện
-                for (path in savedFiles) {
-                    val mime = if (path.endsWith(".gif")) "image/gif" else "image/webp"
-                    MediaScannerConnection.scanFile(activity, arrayOf(path), arrayOf(mime), null)
-                }
-
-                val msg = if (savedFiles.size > 1) {
-                    "Đã lưu file gốc + GIF động vào Pictures/TikTokStickers/"
-                } else {
-                    "Đã lưu vào Pictures/TikTokStickers/"
-                }
-                showToast(activity, msg)
+                showToast(activity, "Đã lưu vào Pictures/TikTokStickers/${destFile.name}")
             }.onFailure { err ->
                 log("Error downloading original sticker: ${err.message}")
                 showToast(activity, "Lỗi khi lưu sticker: ${err.localizedMessage}")
@@ -517,52 +534,55 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Chuyển đổi sang GIF động và gửi sang Telegram (Nekogram / bản chính thức / NekoX)
+     * 3. Lưu ảnh GIF động (.gif)
      */
-    private fun executeShareTelegramGif(
+    private fun executeSaveGif(
         activity: Activity,
         url: String,
         updateStatus: (String) -> Unit,
-        onComplete: () -> Unit
+        onFinish: () -> Unit
     ) {
         Thread {
             runCatching {
                 updateStatus("Đang tải dữ liệu sticker...")
                 val bytes = fetchUrlBytes(url) ?: run {
                     showToast(activity, "Không thể tải sticker từ CDN")
-                    activity.runOnUiThread { onComplete() }
+                    activity.runOnUiThread { onFinish() }
                     return@Thread
                 }
 
+                val targetDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "TikTokStickers"
+                )
+                if (!targetDir.exists()) targetDir.mkdirs()
+
+                val baseName = "sticker_${System.currentTimeMillis()}"
                 val isAlreadyGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
-                val shareFile: File
 
                 if (isAlreadyGif) {
-                    shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.gif")
-                    shareFile.writeBytes(bytes)
+                    val destFile = File(targetDir, "$baseName.gif")
+                    destFile.writeBytes(bytes)
+                    MediaScannerConnection.scanFile(activity, arrayOf(destFile.absolutePath), arrayOf("image/gif"), null)
+                    showToast(activity, "Đã lưu: ${destFile.name}")
                 } else {
                     updateStatus("Đang chuyển đổi sang GIF động...")
-                    val tempGif = File(activity.cacheDir, "telegram_sticker_${System.currentTimeMillis()}.gif")
+                    val gifFile = File(targetDir, "$baseName.gif")
                     val cl = appClassLoader ?: activity.classLoader
-                    val ok = WebpToGifConverter.convertWebpToGif(bytes, tempGif, cl)
-                    if (ok && tempGif.length() > 100) {
-                        shareFile = tempGif
+                    val ok = WebpToGifConverter.convertWebpToGif(bytes, gifFile, cl)
+                    if (ok && gifFile.exists() && gifFile.length() > 500) {
+                        MediaScannerConnection.scanFile(activity, arrayOf(gifFile.absolutePath), arrayOf("image/gif"), null)
+                        showToast(activity, "Đã lưu ảnh GIF: ${gifFile.name}")
                     } else {
-                        // Fallback: gửi file WebP gốc (Telegram vẫn hiển thị được ảnh)
-                        shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.webp")
-                        shareFile.writeBytes(bytes)
+                        gifFile.delete()
+                        showToast(activity, "Không thể tạo GIF, vui lòng lưu WebM hoặc WebP gốc")
                     }
                 }
-
-                activity.runOnUiThread {
-                    onComplete()
-                    val ext = if (shareFile.name.endsWith(".gif")) "gif" else "webp"
-                    shareFileToTelegram(activity, shareFile, ext)
-                }
+                activity.runOnUiThread { onFinish() }
             }.onFailure { err ->
-                log("Error preparing Telegram sticker: ${err.message}")
+                log("Error saving GIF: ${err.message}")
                 showToast(activity, "Lỗi: ${err.localizedMessage}")
-                activity.runOnUiThread { onComplete() }
+                activity.runOnUiThread { onFinish() }
             }
         }.start()
     }
@@ -582,42 +602,6 @@ class MainHook : IXposedHookLoadPackage {
                 null
             }
         }.getOrNull()
-    }
-
-    private fun resolveTelegramPackage(context: Context): String? {
-        val pm = context.packageManager
-        for (pkg in TELEGRAM_PACKAGES) {
-            runCatching {
-                pm.getPackageInfo(pkg, 0)
-                return pkg
-            }
-        }
-        return null
-    }
-
-    private fun shareFileToTelegram(activity: Activity, file: File, extension: String) {
-        activity.runOnUiThread {
-            runCatching {
-                val mimeType = if (extension == "gif") "image/gif" else "image/webp"
-                val fileUri = resolveShareableUri(activity, file)
-
-                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = mimeType
-                    putExtra(Intent.EXTRA_STREAM, fileUri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
-                    clipData = ClipData.newRawUri("sticker", fileUri)
-                }
-
-                // Luôn mở System Chooser để hiển thị đầy đủ các ứng dụng (Nekogram, Telegram, v.v.)
-                // Giúp người dùng chọn trực tiếp cuộc trò chuyện mong muốn mà không bị kẹt hay bị chặn
-                val chooser = Intent.createChooser(sendIntent, "Gửi sticker qua...")
-                chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                activity.startActivity(chooser)
-            }.onFailure {
-                log("Failed to share to Telegram: ${it.message}")
-                showToast(activity, "Không thể mở trình chia sẻ: ${it.localizedMessage}")
-            }
-        }
     }
 
     private fun copyUrlToClipboard(activity: Activity, url: String) {

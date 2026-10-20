@@ -544,7 +544,7 @@ class AnimatedGifEncoder {
                 val r = (thepicture[pix].toInt() and 0xFF) shl 4
                 val g = (thepicture[pix + 1].toInt() and 0xFF) shl 4
                 val b = (thepicture[pix + 2].toInt() and 0xFF) shl 4
-                var j = contest(b, g, r)
+                var j = contest(r, g, b)
                 altersingle(alpha, j, r, g, b)
                 if (rad != 0) alterneigh(rad, j, r, g, b)
                 pix += step
@@ -552,13 +552,13 @@ class AnimatedGifEncoder {
             }
         }
 
-        private fun altersingle(alpha: Int, i: Int, b: Int, g: Int, r: Int) {
-            network[i][0] -= (alpha * (network[i][0] - b)) / 1024
+        private fun altersingle(alpha: Int, i: Int, r: Int, g: Int, b: Int) {
+            network[i][0] -= (alpha * (network[i][0] - r)) / 1024
             network[i][1] -= (alpha * (network[i][1] - g)) / 1024
-            network[i][2] -= (alpha * (network[i][2] - r)) / 1024
+            network[i][2] -= (alpha * (network[i][2] - b)) / 1024
         }
 
-        private fun alterneigh(rad: Int, i: Int, b: Int, g: Int, r: Int) {
+        private fun alterneigh(rad: Int, i: Int, r: Int, g: Int, b: Int) {
             val lo = (i - rad).coerceAtLeast(0)
             val hi = (i + rad).coerceAtMost(255)
             var j = i + 1
@@ -568,27 +568,27 @@ class AnimatedGifEncoder {
                 val a = radpower[m++]
                 if (j < hi) {
                     val p = network[j++]
-                    p[0] -= (a * (p[0] - b)) / (1024 * 256)
+                    p[0] -= (a * (p[0] - r)) / (1024 * 256)
                     p[1] -= (a * (p[1] - g)) / (1024 * 256)
-                    p[2] -= (a * (p[2] - r)) / (1024 * 256)
+                    p[2] -= (a * (p[2] - b)) / (1024 * 256)
                 }
                 if (k > lo) {
                     val p = network[k--]
-                    p[0] -= (a * (p[0] - b)) / (1024 * 256)
+                    p[0] -= (a * (p[0] - r)) / (1024 * 256)
                     p[1] -= (a * (p[1] - g)) / (1024 * 256)
-                    p[2] -= (a * (p[2] - r)) / (1024 * 256)
+                    p[2] -= (a * (p[2] - b)) / (1024 * 256)
                 }
             }
         }
 
-        private fun contest(b: Int, g: Int, r: Int): Int {
+        private fun contest(r: Int, g: Int, b: Int): Int {
             var bestd = 0x7FFFFFFF
             var bestbiasd = bestd
             var bestpos = -1
             var bestbiaspos = bestpos
             for (i in 0 until 256) {
                 val p = network[i]
-                val dist = abs(p[0] - b) + abs(p[1] - g) + abs(p[2] - r)
+                val dist = abs(p[0] - r) + abs(p[1] - g) + abs(p[2] - b)
                 if (dist < bestd) { bestd = dist; bestpos = i }
                 val biasdist = dist - (bias[i] shr 12)
                 if (biasdist < bestbiasd) { bestbiasd = biasdist; bestbiaspos = i }
