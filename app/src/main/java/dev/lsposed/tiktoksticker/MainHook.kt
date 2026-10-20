@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -15,7 +16,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.StrictMode
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.Toast
@@ -32,27 +35,38 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.WeakHashMap
+import kotlin.math.abs
 
 /**
  * TikTokStickerDownloader - LSPosed Module
- * Hỗ trợ tải sticker động (.webp / .gif) từ bình luận TikTok hoặc chia sẻ sang Telegram.
- * Tích hợp bộ chuyển đổi WebP -> GIF động và giao diện BottomSheet chuẩn TikTok Tux Design.
+ * Hỗ trợ tải sticker động (.webp / .gif) từ bình luận TikTok, lưu sẵn định dạng GIF động dùng được trên Telegram,
+ * hoặc gửi thẳng sang Telegram (hỗ trợ Nekogram). Giao diện BottomSheet chuẩn TikTok Tux Design.
  */
 class MainHook : IXposedHookLoadPackage {
 
     companion object {
         private const val TAG = "TikTokStickerHook"
-        private const val TELEGRAM_PACKAGE = "org.telegram.messenger"
+        private const val LONG_PRESS_TIMEOUT_MS = 600L
 
-        // Danh sách target package
+        // Danh sách target package TikTok
         private val TARGET_PACKAGES = setOf(
             "com.ss.android.ugc.trill",      // TikTok Châu Á / VN
             "com.zhiliaoapp.musically"       // TikTok Quốc tế
         )
 
+        // Các package Telegram family (ưu tiên Nekogram vì người dùng đang dùng)
+        private val TELEGRAM_PACKAGES = listOf(
+            "tw.nekomimi.nekogram",   // Nekogram
+            "org.telegram.messenger", // Telegram chính thức
+            "org.telegram.plus",      // Plus Messenger
+            "nekox.messenger"         // NekoX
+        )
+
         // Bộ nhớ đệm WeakHashMap để tránh memory leak
         private val viewToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
         private val controllerToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
+
+        private val mainHandler = Handler(Looper.getMainLooper())
 
         private fun log(msg: String) {
             Log.d(TAG, msg)
@@ -62,24 +76,39 @@ class MainHook : IXposedHookLoadPackage {
 
     private var appClassLoader: ClassLoader? = null
 
+    // Trạng thái phát hiện nhấn giữ (không can thiệp cờ clickable của View để không phá cử chỉ vuốt)
+    private var longPressPending = false
+    private var downX = 0f
+    private var downY = 0f
+    private var downActivity: Activity? = null
+    private var touchSlop = 8
+
+    private val longPressRunnable = Runnable {
+        if (longPressPending) {
+            longPressPending = false
+            val activity = downActivity ?: return@Runnable
+            handleLongPress(activity, downX, downY)
+        }
+    }
+
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName !in TARGET_PACKAGES) return
 
         appClassLoader = lpparam.classLoader
         log("Initializing hook on target package: ${lpparam.packageName} (process: ${lpparam.processName})")
 
-        // Hook ByteDance Lighten (SmartImageView & superclasses LX/04nV...)
+        // Tầng 1: Hook thư viện hiển thị ảnh để bắt URL sticker
         runCatching {
             hookSmartImageView(lpparam.classLoader)
         }.onFailure {
             log("Failed to hook SmartImageView: ${it.message}")
         }
 
-        // Can thiệp sự kiện tương tác
+        // Tầng 2: Phát hiện nhấn giữ qua Activity.dispatchTouchEvent (không phá vuốt)
         runCatching {
-            hookViewInteraction(lpparam.classLoader)
+            hookActivityTouch(lpparam.classLoader)
         }.onFailure {
-            log("Failed to hook View interaction: ${it.message}")
+            log("Failed to hook Activity touch: ${it.message}")
         }
     }
 
@@ -100,27 +129,7 @@ class MainHook : IXposedHookLoadPackage {
 
         log("Found SmartImageView: ${smartImageViewClass.name}, injecting hooks...")
 
-        // 1. Hook tất cả constructor của SmartImageView để tiêm listener sớm
-        runCatching {
-            XposedBridge.hookAllConstructors(smartImageViewClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val view = param.thisObject as? View ?: return
-                    injectInteraction(view)
-                }
-            })
-        }
-
-        // 2. Hook onAttachedToWindow
-        runCatching {
-            XposedBridge.hookAllMethods(smartImageViewClass, "onAttachedToWindow", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val view = param.thisObject as? View ?: return
-                    injectInteraction(view)
-                }
-            })
-        }
-
-        // 3. Duyệt toàn bộ phân cấp lớp: SmartImageView -> LX/04nV (SimpleDraweeView) -> LX/04nU -> LX/04nT (DraweeView)
+        // Duyệt toàn bộ phân cấp lớp: SmartImageView -> LX/04nV (SimpleDraweeView) -> LX/04nU -> LX/04nT (DraweeView)
         var currentClass: Class<*>? = smartImageViewClass
         var hookedMethodsCount = 0
 
@@ -138,9 +147,7 @@ class MainHook : IXposedHookLoadPackage {
                                 val url = extractUrlFromObject(arg)
                                 if (!url.isNullOrBlank()) {
                                     viewToUrlMap[view] = url
-                                    log("Captured URL from ${view.javaClass.simpleName}.${method.name}: $url")
                                 }
-                                injectInteraction(view)
                             }
                         })
                         hookedMethodsCount++
@@ -154,106 +161,104 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     // =========================================================================
-    // TẦNG 2: CAN THIỆP SỰ KIỆN TƯƠNG TÁC (LONG CLICK TRIGGER)
+    // TẦNG 2: PHÁT HIỆN NHẤN GIỮ KHÔNG PHÁ CỬ CHỈ VUỐT
     // =========================================================================
 
-    private fun hookViewInteraction(classLoader: ClassLoader) {
-        // Hook View.setOnLongClickListener để bọc listener gốc
-        XposedBridge.hookAllMethods(
-            View::class.java,
-            "setOnLongClickListener",
+    private fun hookActivityTouch(classLoader: ClassLoader) {
+        XposedHelpers.findAndHookMethod(
+            Activity::class.java,
+            "dispatchTouchEvent",
+            MotionEvent::class.java,
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     runCatching {
-                        val view = param.thisObject as? View ?: return
-                        val className = view.javaClass.name
-
-                        val isCandidateView = className.contains("SmartImageView") ||
-                                className.contains("DraweeView") ||
-                                className.contains("04n") ||
-                                view is ViewGroup
-
-                        if (isCandidateView) {
-                            val originalListener = param.args.firstOrNull() as? View.OnLongClickListener
-                            param.args[0] = View.OnLongClickListener { v ->
-                                // 1. Kiểm tra trực tiếp trên View được click
-                                val stickerUrl = extractUrlFromView(v)
-                                if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
-                                    log("Intercepted long click on sticker view: $v, URL: $stickerUrl")
-                                    showTikTokStyleBottomSheet(v, stickerUrl)
-                                    return@OnLongClickListener true
-                                }
-
-                                // 2. Nếu là ViewGroup (dòng bình luận), quét các view con tìm SmartImageView chứa sticker
-                                if (v is ViewGroup) {
-                                    val childSticker = findStickerViewInChildren(v)
-                                    if (childSticker != null) {
-                                        val childUrl = extractUrlFromView(childSticker)
-                                        if (!childUrl.isNullOrBlank() && isStickerCandidate(childSticker, childUrl)) {
-                                            log("Intercepted long click on comment parent containing sticker: $childUrl")
-                                            showTikTokStyleBottomSheet(childSticker, childUrl)
-                                            return@OnLongClickListener true
-                                        }
-                                    }
-                                }
-
-                                originalListener?.onLongClick(v) ?: false
-                            }
-                        }
+                        val activity = param.thisObject as? Activity ?: return
+                        val ev = param.args[0] as? MotionEvent ?: return
+                        handleTouchEvent(activity, ev)
                     }
                 }
             }
         )
+        log("Hooked Activity.dispatchTouchEvent for non-intrusive long-press detection")
     }
 
-    /**
-     * Tiêm OnLongClickListener chủ động vào View
-     */
-    private fun injectInteraction(view: View) {
-        runCatching {
-            view.isClickable = true
-            view.isLongClickable = true
-            view.setOnLongClickListener { v ->
-                val stickerUrl = extractUrlFromView(v)
-                if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
-                    log("Long click triggered on injected listener: $stickerUrl")
-                    showTikTokStyleBottomSheet(v, stickerUrl)
-                    true
-                } else {
-                    false
+    private fun handleTouchEvent(activity: Activity, ev: MotionEvent) {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = ev.rawX
+                downY = ev.rawY
+                downActivity = activity
+                touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
+                longPressPending = true
+                mainHandler.removeCallbacks(longPressRunnable)
+                mainHandler.postDelayed(longPressRunnable, LONG_PRESS_TIMEOUT_MS)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (longPressPending) {
+                    val dx = abs(ev.rawX - downX)
+                    val dy = abs(ev.rawY - downY)
+                    if (dx > touchSlop || dy > touchSlop) {
+                        cancelLongPress()
+                    }
                 }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> cancelLongPress()
+        }
+    }
+
+    private fun cancelLongPress() {
+        if (longPressPending) {
+            longPressPending = false
+            mainHandler.removeCallbacks(longPressRunnable)
+        }
+    }
+
+    private fun handleLongPress(activity: Activity, screenX: Float, screenY: Float) {
+        val decor = activity.window?.decorView ?: return
+        val stickerView = findStickerViewAt(decor, screenX, screenY)
+        if (stickerView != null) {
+            val url = extractUrlFromView(stickerView)
+            if (!url.isNullOrBlank() && isStickerCandidate(stickerView, url)) {
+                log("Long press detected on sticker: $url")
+                showTikTokStyleBottomSheet(stickerView, url)
             }
         }
     }
 
     /**
-     * Quét đệ quy ViewGroup để tìm SmartImageView chứa sticker
+     * Tìm sticker view sâu nhất chứa điểm chạm (dùng global visible rect, không đụng cờ clickable)
      */
-    private fun findStickerViewInChildren(group: ViewGroup): View? {
-        for (i in 0 until group.childCount) {
-            val child = group.getChildAt(i)
-            val name = child.javaClass.name
-            if (name.contains("SmartImageView") || name.contains("04n")) {
-                val url = extractUrlFromView(child)
-                if (!url.isNullOrBlank() && isStickerCandidate(child, url)) {
-                    return child
-                }
-            } else if (child is ViewGroup) {
-                val found = findStickerViewInChildren(child)
+    private fun findStickerViewAt(view: View, screenX: Float, screenY: Float): View? {
+        val rect = Rect()
+        view.getGlobalVisibleRect(rect)
+        if (!rect.contains(screenX.toInt(), screenY.toInt())) return null
+
+        if (view is ViewGroup) {
+            for (i in view.childCount - 1 downTo 0) {
+                val child = view.getChildAt(i)
+                if (child.visibility != View.VISIBLE) continue
+                val found = findStickerViewAt(child, screenX, screenY)
                 if (found != null) return found
+            }
+        }
+
+        val name = view.javaClass.name
+        if (name.contains("SmartImageView") || name.contains("04n") || name.contains("DraweeView")) {
+            val url = extractUrlFromView(view)
+            if (!url.isNullOrBlank() && isStickerCandidate(view, url)) {
+                return view
             }
         }
         return null
     }
 
-    /**
-     * Trích xuất URL từ View kết hợp WeakHashMap, getImageUri() và Reflection fallback
-     */
+    // =========================================================================
+    // TRÍCH XUẤT URL
+    // =========================================================================
+
     private fun extractUrlFromView(view: View): String? {
-        // 1. WeakHashMap lookup
         viewToUrlMap[view]?.let { return it }
 
-        // 2. Gọi getImageUri() phản chiếu từ LX/04nV (SimpleDraweeView)
         runCatching {
             val getImageUriMethod = view.javaClass.getMethod("getImageUri")
             val uri = getImageUriMethod.invoke(view) as? Uri
@@ -266,7 +271,6 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // 3. Quét các trường của View và các lớp cha
         runCatching {
             var cls: Class<*>? = view.javaClass
             while (cls != null && cls != View::class.java && cls != Any::class.java) {
@@ -283,7 +287,6 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // 4. Controller lookup
         runCatching {
             val getController = view.javaClass.getMethod("getController")
             val controller = getController.invoke(view)
@@ -297,7 +300,6 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // 5. View tag
         val tag = view.tag
         if (tag != null) {
             val url = extractUrlFromObject(tag)
@@ -307,9 +309,6 @@ class MainHook : IXposedHookLoadPackage {
         return null
     }
 
-    /**
-     * Trích xuất URL từ bất kỳ đối tượng nào (Uri, String, Model, Controller, ImageRequest, Options)
-     */
     private fun extractUrlFromObject(obj: Any): String? {
         if (obj is Uri) {
             val s = obj.toString()
@@ -319,7 +318,6 @@ class MainHook : IXposedHookLoadPackage {
             if (obj.startsWith("http://") || obj.startsWith("https://")) return obj
         }
 
-        // Quét các trường của đối tượng
         runCatching {
             for (field in obj.javaClass.declaredFields) {
                 field.isAccessible = true
@@ -344,17 +342,10 @@ class MainHook : IXposedHookLoadPackage {
         return null
     }
 
-    /**
-     * Lọc ứng viên sticker: phân biệt với avatar người dùng
-     */
     private fun isStickerCandidate(view: View, url: String): Boolean {
         val lowerUrl = url.lowercase()
         if (!lowerUrl.startsWith("http")) return false
-
-        // Loại trừ avatar profile trong comment
-        if (lowerUrl.contains("avatar") || lowerUrl.contains("/user/")) {
-            return false
-        }
+        if (lowerUrl.contains("avatar") || lowerUrl.contains("/user/")) return false
 
         val isCdn = lowerUrl.contains("tiktokcdn") ||
                 lowerUrl.contains("byteimg") ||
@@ -381,12 +372,9 @@ class MainHook : IXposedHookLoadPackage {
     // GIAO DIỆN TIKTOK BOTTOM SHEET & TÁC VỤ
     // =========================================================================
 
-    /**
-     * Hiển thị BottomSheet chuẩn phong cách TikTok Tux Design
-     */
     private fun showTikTokStyleBottomSheet(view: View, url: String) {
         val activity = getActivityFromView(view) ?: return
-        val previewDrawable: Drawable? = (view as? ImageView)?.drawable
+        val previewDrawable = getPreviewDrawable(view)
 
         activity.runOnUiThread {
             runCatching {
@@ -416,10 +404,31 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Tải sticker gốc (.webp / .gif) vào Thư viện
+     * Lấy drawable tốt nhất để hiển thị ở ô preview
+     */
+    private fun getPreviewDrawable(view: View): Drawable? {
+        (view as? ImageView)?.drawable?.let { return it }
+
+        runCatching {
+            val m = view.javaClass.getMethod("getTopLevelDrawable")
+            (m.invoke(view) as? Drawable)?.let { return it }
+        }
+        runCatching {
+            val getController = view.javaClass.getMethod("getController")
+            val controller = getController.invoke(view)
+            if (controller != null) {
+                val m = controller.javaClass.getMethod("getTopLevelDrawable")
+                (m.invoke(controller) as? Drawable)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Tải sticker gốc và lưu kèm bản GIF động (dùng được trên Telegram)
      */
     private fun executeDownloadOriginal(activity: Activity, url: String) {
-        showToast(activity, "Đang tải sticker vào Thư viện...")
+        showToast(activity, "Đang tải sticker...")
 
         Thread {
             runCatching {
@@ -429,10 +438,10 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 val isGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
-                val isWebp = isWebpHeader(bytes) || isAnimatedWebPHeader(bytes)
+                val isAnimatedWebp = isAnimatedWebPHeader(bytes)
                 val ext = when {
                     isGif -> "gif"
-                    isWebp -> "webp"
+                    isAnimatedWebp || isWebpHeader(bytes) -> "webp"
                     isPngHeader(bytes) -> "png"
                     else -> "webp"
                 }
@@ -443,19 +452,40 @@ class MainHook : IXposedHookLoadPackage {
                 )
                 if (!targetDir.exists()) targetDir.mkdirs()
 
-                val destFile = File(targetDir, "sticker_${System.currentTimeMillis()}.$ext")
-                destFile.writeBytes(bytes)
+                val baseName = "sticker_${System.currentTimeMillis()}"
 
-                val mimeType = if (ext == "gif") "image/gif" else "image/webp"
-                MediaScannerConnection.scanFile(
-                    activity,
-                    arrayOf(destFile.absolutePath),
-                    arrayOf(mimeType)
-                ) { path, uri ->
-                    log("Scanned into gallery: $path -> $uri")
+                // 1. Lưu file gốc
+                val originalFile = File(targetDir, "$baseName.$ext")
+                originalFile.writeBytes(bytes)
+
+                val savedFiles = mutableListOf(originalFile.absolutePath)
+
+                // 2. Nếu là Animated WebP, chuyển thêm bản GIF động (Telegram-ready)
+                if (isAnimatedWebp) {
+                    val gifFile = File(targetDir, "$baseName.gif")
+                    val cl = appClassLoader ?: activity.classLoader
+                    val ok = WebpToGifConverter.convertWebpToGif(bytes, gifFile, cl)
+                    if (ok && gifFile.length() > 100) {
+                        savedFiles.add(gifFile.absolutePath)
+                        log("Saved Telegram-ready GIF: ${gifFile.name} (${gifFile.length()} bytes)")
+                    } else {
+                        gifFile.delete()
+                        log("GIF conversion produced invalid output, keeping only original")
+                    }
                 }
 
-                showToast(activity, "Đã lưu vào Pictures/TikTokStickers/${destFile.name}")
+                // Quét vào thư viện
+                for (path in savedFiles) {
+                    val mime = if (path.endsWith(".gif")) "image/gif" else "image/webp"
+                    MediaScannerConnection.scanFile(activity, arrayOf(path), arrayOf(mime), null)
+                }
+
+                val msg = if (savedFiles.size > 1) {
+                    "Đã lưu file gốc + GIF động vào Pictures/TikTokStickers/"
+                } else {
+                    "Đã lưu vào Pictures/TikTokStickers/"
+                }
+                showToast(activity, msg)
             }.onFailure { err ->
                 log("Error downloading original sticker: ${err.message}")
                 showToast(activity, "Lỗi khi lưu sticker: ${err.localizedMessage}")
@@ -464,7 +494,7 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Chuyển đổi WebP thành GIF động và gửi sang Telegram (không bị đóng băng)
+     * Chuyển đổi sang GIF động và gửi sang Telegram (Nekogram / bản chính thức / NekoX)
      */
     private fun executeShareTelegramGif(
         activity: Activity,
@@ -488,15 +518,14 @@ class MainHook : IXposedHookLoadPackage {
                     shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.gif")
                     shareFile.writeBytes(bytes)
                 } else {
-                    // Chuyển đổi Animated WebP -> Animated GIF
                     updateStatus("Đang chuyển đổi sang GIF động...")
                     val tempGif = File(activity.cacheDir, "telegram_sticker_${System.currentTimeMillis()}.gif")
                     val cl = appClassLoader ?: activity.classLoader
                     val ok = WebpToGifConverter.convertWebpToGif(bytes, tempGif, cl)
-                    if (ok && tempGif.exists() && tempGif.length() > 0) {
+                    if (ok && tempGif.length() > 100) {
                         shareFile = tempGif
                     } else {
-                        // Fallback: giữ file WebP
+                        // Fallback: gửi file WebP gốc (Telegram vẫn hiển thị được ảnh)
                         shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.webp")
                         shareFile.writeBytes(bytes)
                     }
@@ -515,9 +544,6 @@ class MainHook : IXposedHookLoadPackage {
         }.start()
     }
 
-    /**
-     * Tải byte array từ URL CDN
-     */
     private fun fetchUrlBytes(url: String): ByteArray? {
         return runCatching {
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -535,9 +561,17 @@ class MainHook : IXposedHookLoadPackage {
         }.getOrNull()
     }
 
-    /**
-     * Chia sẻ file sang Telegram
-     */
+    private fun resolveTelegramPackage(context: Context): String? {
+        val pm = context.packageManager
+        for (pkg in TELEGRAM_PACKAGES) {
+            runCatching {
+                pm.getPackageInfo(pkg, 0)
+                return pkg
+            }
+        }
+        return null
+    }
+
     private fun shareFileToTelegram(activity: Activity, file: File, extension: String) {
         activity.runOnUiThread {
             runCatching {
@@ -547,19 +581,14 @@ class MainHook : IXposedHookLoadPackage {
                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
                     type = mimeType
                     putExtra(Intent.EXTRA_STREAM, fileUri)
-                    setPackage(TELEGRAM_PACKAGE)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
 
-                val isTelegramInstalled = runCatching {
-                    activity.packageManager.getPackageInfo(TELEGRAM_PACKAGE, 0)
-                    true
-                }.getOrDefault(false)
-
-                if (isTelegramInstalled) {
+                val tgPackage = resolveTelegramPackage(activity)
+                if (tgPackage != null) {
+                    sendIntent.setPackage(tgPackage)
                     activity.startActivity(sendIntent)
                 } else {
-                    sendIntent.setPackage(null)
                     val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
                     activity.startActivity(chooser)
                 }
@@ -650,7 +679,7 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun showToast(activity: Activity, message: String) {
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
         }
     }
