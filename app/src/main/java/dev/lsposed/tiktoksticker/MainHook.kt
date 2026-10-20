@@ -46,7 +46,8 @@ class MainHook : IXposedHookLoadPackage {
 
     companion object {
         private const val TAG = "TikTokStickerHook"
-        private const val LONG_PRESS_TIMEOUT_MS = 600L
+        // Ngắn hơn ngưỡng long-press của TikTok (~400-500ms) để sheet của module kịp hiện trước menu bình luận
+        private const val LONG_PRESS_TIMEOUT_MS = 350L
 
         // Danh sách target package TikTok
         private val TARGET_PACKAGES = setOf(
@@ -222,8 +223,10 @@ class MainHook : IXposedHookLoadPackage {
             if (!url.isNullOrBlank() && isStickerCandidate(stickerView, url)) {
                 log("Long press detected on sticker: $url")
                 showTikTokStyleBottomSheet(stickerView, url)
+                return
             }
         }
+        log("Long press fired but no sticker view at ($screenX, $screenY)")
     }
 
     /**
