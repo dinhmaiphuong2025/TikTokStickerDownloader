@@ -5,7 +5,6 @@ import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -25,7 +24,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import kotlin.math.min
 
 /**
  * TikTokBottomSheet - Giao diện Bottom Sheet mô phỏng 100% phong cách Tux Design System của TikTok.
@@ -33,7 +31,7 @@ import kotlin.math.min
  */
 class TikTokBottomSheet(
     private val activity: Activity,
-    private val previewDrawable: Drawable?,
+    private val previewBitmap: Bitmap?,
     private val onDownloadOriginal: () -> Unit,
     private val onShareTelegramGif: (updateStatus: (String) -> Unit) -> Unit,
     private val onCopyUrl: () -> Unit
@@ -116,7 +114,9 @@ class TikTokBottomSheet(
             scaleType = ImageView.ScaleType.FIT_CENTER
             clipToOutline = true
             setPadding(dp(6f), dp(6f), dp(6f), dp(6f))
-            createPreviewBitmap(previewDrawable, dp(44f))?.let { setImageBitmap(it) }
+            if (previewBitmap != null) {
+                setImageBitmap(previewBitmap)
+            }
         }
         val thumbParams = LinearLayout.LayoutParams(dp(56f), dp(56f)).apply {
             rightMargin = dp(14f)
@@ -253,26 +253,6 @@ class TikTokBottomSheet(
 
     fun dismiss() {
         runCatching { dialog.dismiss() }
-    }
-
-    /**
-     * Render drawable preview thành bitmap vừa khung để luôn hiển thị đầy đủ sticker
-     */
-    private fun createPreviewBitmap(drawable: Drawable?, sizePx: Int): Bitmap? {
-        if (drawable == null) return null
-        return runCatching {
-            val iw = drawable.intrinsicWidth.takeIf { it > 0 } ?: sizePx
-            val ih = drawable.intrinsicHeight.takeIf { it > 0 } ?: sizePx
-            val scale = min(sizePx.toFloat() / iw, sizePx.toFloat() / ih).coerceAtMost(1f)
-            val outW = (iw * scale).toInt().coerceAtLeast(1)
-            val outH = (ih * scale).toInt().coerceAtLeast(1)
-            val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
-            drawable.setBounds(0, 0, outW, outH)
-            drawable.draw(canvas)
-            bmp
-        }.getOrNull()
     }
 
     /**

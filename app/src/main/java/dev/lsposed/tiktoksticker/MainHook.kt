@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.media.MediaScannerConnection
@@ -36,6 +38,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.WeakHashMap
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
  * TikTokStickerDownloader - LSPosed Module
@@ -396,7 +399,7 @@ class MainHook : IXposedHookLoadPackage {
 
     private fun showTikTokStyleBottomSheet(view: View, url: String) {
         val activity = getActivityFromView(view) ?: return
-        val previewDrawable = getPreviewDrawable(view)
+        val previewBitmap = capturePreviewBitmap(view)
 
         activity.runOnUiThread {
             runCatching {
@@ -404,7 +407,7 @@ class MainHook : IXposedHookLoadPackage {
 
                 currentSheet = TikTokBottomSheet(
                     activity = activity,
-                    previewDrawable = previewDrawable,
+                    previewBitmap = previewBitmap,
                     onDownloadOriginal = {
                         executeDownloadOriginal(activity, url)
                     },
@@ -426,24 +429,22 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Lấy drawable tốt nhất để hiển thị ở ô preview
+     * Chụp bitmap preview từ view mà KHÔNG đụng vào bounds của drawable gốc
+     * (tránh làm sticker trong bình luận bị khoá kích thước)
      */
-    private fun getPreviewDrawable(view: View): Drawable? {
-        (view as? ImageView)?.drawable?.let { return it }
-
-        runCatching {
-            val m = view.javaClass.getMethod("getTopLevelDrawable")
-            (m.invoke(view) as? Drawable)?.let { return it }
-        }
-        runCatching {
-            val getController = view.javaClass.getMethod("getController")
-            val controller = getController.invoke(view)
-            if (controller != null) {
-                val m = controller.javaClass.getMethod("getTopLevelDrawable")
-                (m.invoke(controller) as? Drawable)?.let { return it }
-            }
-        }
-        return null
+    private fun capturePreviewBitmap(view: View, maxSizePx: Int = 120): Bitmap? {
+        return runCatching {
+            val w = view.width.takeIf { it > 0 } ?: return@runCatching null
+            val h = view.height.takeIf { it > 0 } ?: return@runCatching null
+            val scale = min(maxSizePx.toFloat() / w, maxSizePx.toFloat() / h).coerceAtMost(1f)
+            val outW = (w * scale).toInt().coerceAtLeast(1)
+            val outH = (h * scale).toInt().coerceAtLeast(1)
+            val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.scale(scale, scale)
+            view.draw(canvas)
+            bmp
+        }.getOrNull()
     }
 
     /**
@@ -603,14 +604,28 @@ class MainHook : IXposedHookLoadPackage {
                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
                     type = mimeType
                     putExtra(Intent.EXTRA_STREAM, fileUri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                    clipData = ClipData.newRawUri("sticker", fileUri)
                 }
 
+                val pm = activity.packageManager
                 val tgPackage = resolveTelegramPackage(activity)
+                var started = false
+
                 if (tgPackage != null) {
+                    // Giới hạn theo package rồi resolve chính xác component để tránh ActivityNotFoundException
                     sendIntent.setPackage(tgPackage)
-                    activity.startActivity(sendIntent)
-                } else {
+                    val resolved = sendIntent.resolveActivity(pm)
+                    if (resolved != null) {
+                        sendIntent.component = resolved
+                        activity.startActivity(sendIntent)
+                        started = true
+                    } else {
+                        sendIntent.setPackage(null)
+                    }
+                }
+
+                if (!started) {
                     val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
                     activity.startActivity(chooser)
                 }

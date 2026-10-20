@@ -18,26 +18,24 @@ object WebpToGifConverter {
 
     private const val TAG = "TikTokStickerHook"
 
+    private fun log(msg: String) {
+        Log.d(TAG, msg)
+        XposedBridge.log("[$TAG] $msg")
+    }
+
     fun convertWebpToGif(
         webpBytes: ByteArray,
         outputFile: File,
         classLoader: ClassLoader
     ): Boolean {
         return runCatching {
-            if (convertViaTikTokNativeWebP(webpBytes, outputFile, classLoader)) {
-                return@runCatching true
-            }
-            false
+            convertViaTikTokNativeWebP(webpBytes, outputFile, classLoader)
         }.getOrElse { e ->
-            Log.e(TAG, "Error in convertWebpToGif", e)
-            XposedBridge.log("[$TAG] Error converting WebP to GIF: ${e.message}")
+            log("Error converting WebP to GIF: ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
 
-    /**
-     * Tận dụng WebPImage và libstatic-webp.so có sẵn trong tiến trình TikTok
-     */
     private fun convertViaTikTokNativeWebP(
         webpBytes: ByteArray,
         outputFile: File,
@@ -47,16 +45,16 @@ object WebpToGifConverter {
             "com.facebook.animated.webp.WebPImage",
             classLoader
         ) ?: run {
-            Log.w(TAG, "WebPImage class not found")
+            log("WebPImage class not found")
+            return false
+        }
+
+        val webpImage = createWebPImage(webPClass, webpBytes) ?: run {
+            log("Failed to create WebPImage from ${webpBytes.size} bytes")
             return false
         }
 
         return runCatching {
-            val webpImage = createWebPImage(webPClass, webpBytes) ?: run {
-                Log.w(TAG, "Failed to create WebPImage from bytes")
-                return false
-            }
-
             val width = invokeInt(webpImage, "getWidth")
             val height = invokeInt(webpImage, "getHeight")
             val frameCount = invokeInt(webpImage, "getFrameCount")
@@ -64,12 +62,12 @@ object WebpToGifConverter {
                 ?: IntArray(frameCount) { 60 }
 
             if (frameCount <= 0 || width <= 0 || height <= 0) {
-                Log.w(TAG, "Invalid dimensions: ${width}x$height, $frameCount frames")
+                log("Invalid dimensions: ${width}x$height, $frameCount frames")
                 runCatching { invokeVoid(webpImage, "dispose") }
                 return false
             }
 
-            Log.d(TAG, "WebPImage decoded: ${width}x$height, $frameCount frames")
+            log("WebPImage decoded: ${width}x$height, $frameCount frames, durations=${durations.size}")
 
             val fos = FileOutputStream(outputFile)
             val encoder = AnimatedGifEncoder()
@@ -82,30 +80,26 @@ object WebpToGifConverter {
 
             val step = if (frameCount > 60) (frameCount / 60) + 1 else 1
             var addedFrames = 0
+            var nullFrames = 0
+            var renderFailures = 0
 
             for (i in 0 until frameCount step step) {
-                val frame = invokeFrame(webpImage, i) ?: continue
+                val frame = invokeFrame(webpImage, i)
+                if (frame == null) {
+                    nullFrames++
+                    continue
+                }
 
-                runCatching {
-                    // Xóa nền trong suốt trước mỗi frame để tránh lẫn frame cũ
-                    canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+                val rendered = renderFrame(frame, width, height, frameBitmap, canvas)
+                if (!rendered) {
+                    renderFailures++
+                    continue
+                }
 
-                    val rendered = renderFrame(frame, width, height, frameBitmap)
-                    if (!rendered) {
-                        Log.w(TAG, "Frame $i: renderFrame returned false")
-                        invokeVoid(frame, "dispose")
-                        return@runCatching
-                    }
-
-                    val delay = if (i < durations.size && durations[i] > 0) durations[i] * step else 60 * step
-                    encoder.setDelay(delay)
-                    val ok = encoder.addFrame(frameBitmap)
-                    if (ok) addedFrames++
-
-                    // Giải phóng frame native
-                    invokeVoid(frame, "dispose")
-                }.onFailure { e ->
-                    Log.e(TAG, "Frame $i failed: ${e.javaClass.simpleName}: ${e.message}")
+                val delay = if (i < durations.size && durations[i] > 0) durations[i] * step else 60 * step
+                encoder.setDelay(delay)
+                if (encoder.addFrame(frameBitmap)) {
+                    addedFrames++
                 }
             }
 
@@ -113,16 +107,18 @@ object WebpToGifConverter {
             fos.close()
             runCatching { invokeVoid(webpImage, "dispose") }
 
-            if (addedFrames <= 0) {
-                Log.w(TAG, "No frames rendered, output invalid")
+            log("Convert result: added=$addedFrames nullFrames=$nullFrames renderFail=$renderFailures total=$frameCount")
+
+            if (addedFrames <= 1 && frameCount > 1) {
+                log("Too few frames rendered ($addedFrames/$frameCount), output invalid")
                 outputFile.delete()
                 return false
             }
 
-            Log.d(TAG, "Converted WebP -> GIF: $addedFrames frames, ${outputFile.length()} bytes")
+            log("Converted WebP -> GIF: $addedFrames frames, ${outputFile.length()} bytes")
             true
         }.getOrElse { e ->
-            Log.e(TAG, "Native WebP convert failed: ${e.javaClass.simpleName}: ${e.message}", e)
+            log("Native WebP convert failed: ${e.javaClass.simpleName}: ${e.message}")
             outputFile.delete()
             false
         }
@@ -133,13 +129,11 @@ object WebpToGifConverter {
     // =========================================================================
 
     private fun createWebPImage(webPClass: Class<*>, webpBytes: ByteArray): Any? {
-        // Thử create(byte[])
         runCatching {
             val m = findMethod(webPClass, "create", ByteArray::class.java)
             val r = m.invoke(null, webpBytes)
             if (r != null) return r
         }
-        // Thử create(ByteBuffer) với buffer trực tiếp
         runCatching {
             val buf = java.nio.ByteBuffer.allocateDirect(webpBytes.size)
             buf.put(webpBytes)
@@ -148,7 +142,6 @@ object WebpToGifConverter {
             val r = m.invoke(null, buf)
             if (r != null) return r
         }
-        // Thử createFromByteArray(byte[]) (tên cũ)
         runCatching {
             val m = findMethod(webPClass, "createFromByteArray", ByteArray::class.java)
             val r = m.invoke(null, webpBytes)
@@ -157,21 +150,29 @@ object WebpToGifConverter {
         return null
     }
 
+    /**
+     * Thử tất cả biến thể getFrame(int) (bao gồm bridge method do covariant return type)
+     */
     private fun invokeFrame(webpImage: Any, index: Int): Any? {
+        for (m in webpImage.javaClass.declaredMethods) {
+            if (m.name == "getFrame" && m.parameterTypes.size == 1 && m.parameterTypes[0] == Integer.TYPE) {
+                m.isAccessible = true
+                val r = runCatching { m.invoke(webpImage, index) }.getOrNull()
+                if (r != null) return r
+            }
+        }
         return runCatching {
-            val m = findMethod(webpImage.javaClass, "getFrame", Integer.TYPE)
-            m.invoke(webpImage, index)
+            findMethod(webpImage.javaClass, "getFrame", Integer.TYPE).invoke(webpImage, index)
         }.getOrNull()
     }
 
-    private fun renderFrame(frame: Any, width: Int, height: Int, bitmap: Bitmap): Boolean {
-        // Thử renderFrame trước
+    private fun renderFrame(frame: Any, width: Int, height: Int, bitmap: Bitmap, canvas: Canvas): Boolean {
+        canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
         runCatching {
             val m = findMethod(frame.javaClass, "renderFrame", Integer.TYPE, Integer.TYPE, Bitmap::class.java)
             m.invoke(frame, width, height, bitmap)
             return true
         }
-        // Thử nativeRenderFrame
         runCatching {
             val m = findMethod(frame.javaClass, "nativeRenderFrame", Integer.TYPE, Integer.TYPE, Bitmap::class.java)
             m.invoke(frame, width, height, bitmap)
@@ -192,9 +193,6 @@ object WebpToGifConverter {
         runCatching { findMethod(target.javaClass, methodName).invoke(target) }
     }
 
-    /**
-     * Tìm method qua toàn bộ phân cấp lớp và setAccessible(true)
-     */
     private fun findMethod(clazz: Class<*>, name: String, vararg paramTypes: Class<*>): java.lang.reflect.Method {
         var current: Class<*>? = clazz
         while (current != null && current != Any::class.java) {
