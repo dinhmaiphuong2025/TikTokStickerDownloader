@@ -14,7 +14,10 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.StrictMode
+import android.util.Log
 import android.view.View
+import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.Toast
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
@@ -23,6 +26,7 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.io.File
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
@@ -48,220 +52,109 @@ class MainHook : IXposedHookLoadPackage {
         // Bộ nhớ đệm WeakHashMap để tránh memory leak
         private val viewToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
         private val controllerToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
-        private val requestToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
+
+        private fun log(msg: String) {
+            Log.d(TAG, msg)
+            XposedBridge.log("[$TAG] $msg")
+        }
     }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName !in TARGET_PACKAGES) return
 
-        XposedBridge.log("[$TAG] Initializing hook on target package: ${lpparam.packageName} (process: ${lpparam.processName})")
+        log("Initializing hook on target package: ${lpparam.packageName} (process: ${lpparam.processName})")
 
+        // Hook ByteDance Lighten (SmartImageView & superclasses LX/04nV...)
         runCatching {
-            hookFrescoPipeline(lpparam.classLoader)
+            hookSmartImageView(lpparam.classLoader)
         }.onFailure {
-            XposedBridge.log("[$TAG] Failed to hook Fresco pipeline: ${it.message}")
+            log("Failed to hook SmartImageView: ${it.message}")
         }
 
-        runCatching {
-            hookByteDanceLighten(lpparam.classLoader)
-        }.onFailure {
-            XposedBridge.log("[$TAG] Failed to hook ByteDance Lighten: ${it.message}")
-        }
-
+        // Can thiệp sự kiện tương tác
         runCatching {
             hookViewInteraction(lpparam.classLoader)
         }.onFailure {
-            XposedBridge.log("[$TAG] Failed to hook View interaction: ${it.message}")
+            log("Failed to hook View interaction: ${it.message}")
         }
     }
 
     // =========================================================================
-    // TẦNG 1: HOOK THƯ VIỆN HIỂN THỊ ẢNH (FRESCO & BYTEDANCE LIGHTEN)
+    // TẦNG 1: HOOK THƯ VIỆN HIỂN THỊ ẢNH (SMARTIMAGEVIEW & BYTE DANCE LIGHTEN)
     // =========================================================================
 
-    /**
-     * Hook thư viện Facebook Fresco: ImageRequestBuilder, DraweeController, SimpleDraweeView
-     */
-    private fun hookFrescoPipeline(classLoader: ClassLoader) {
-        // 1. Hook com.facebook.imagepipeline.request.ImageRequestBuilder.newBuilderWithSource(Uri)
-        val imageRequestBuilderClass = XposedHelpers.findClassIfExists(
-            "com.facebook.imagepipeline.request.ImageRequestBuilder",
-            classLoader
-        )
-        if (imageRequestBuilderClass != null) {
-            XposedHelpers.findAndHookMethod(
-                imageRequestBuilderClass,
-                "newBuilderWithSource",
-                Uri::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val uri = param.args[0] as? Uri ?: return
-                            val builder = param.result ?: return
-                            requestToUrlMap[builder] = uri.toString()
-                        }
-                    }
-                }
-            )
-
-            // Hook build() của ImageRequestBuilder -> gán URL cho ImageRequest thành phẩm
-            XposedHelpers.findAndHookMethod(
-                imageRequestBuilderClass,
-                "build",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val builder = param.thisObject ?: return
-                            val imageRequest = param.result ?: return
-                            requestToUrlMap[builder]?.let { url ->
-                                requestToUrlMap[imageRequest] = url
-                            }
-                        }
-                    }
-                }
-            )
-            XposedBridge.log("[$TAG] Hooked ImageRequestBuilder successfully")
-        }
-
-        // 2. Hook AbstractDraweeControllerBuilder.setImageRequest & build()
-        val controllerBuilderClass = XposedHelpers.findClassIfExists(
-            "com.facebook.drawee.controller.AbstractDraweeControllerBuilder",
-            classLoader
-        )
-        if (controllerBuilderClass != null) {
-            XposedBridge.hookAllMethods(
-                controllerBuilderClass,
-                "setImageRequest",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val builder = param.thisObject ?: return
-                            val request = param.args.firstOrNull() ?: return
-                            val url = requestToUrlMap[request] ?: extractUriFromImageRequest(request)
-                            if (url != null) {
-                                requestToUrlMap[builder] = url
-                            }
-                        }
-                    }
-                }
-            )
-
-            XposedHelpers.findAndHookMethod(
-                controllerBuilderClass,
-                "build",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val builder = param.thisObject ?: return
-                            val controller = param.result ?: return
-                            requestToUrlMap[builder]?.let { url ->
-                                controllerToUrlMap[controller] = url
-                            }
-                        }
-                    }
-                }
-            )
-            XposedBridge.log("[$TAG] Hooked AbstractDraweeControllerBuilder successfully")
-        }
-
-        // 3. Hook SimpleDraweeView & DraweeView
-        val draweeViewClass = XposedHelpers.findClassIfExists(
-            "com.facebook.drawee.view.DraweeView",
-            classLoader
-        )
-        if (draweeViewClass != null) {
-            // Hook setController(DraweeController)
-            XposedBridge.hookAllMethods(
-                draweeViewClass,
-                "setController",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val view = param.thisObject as? View ?: return
-                            val controller = param.args.firstOrNull() ?: return
-                            controllerToUrlMap[controller]?.let { url ->
-                                viewToUrlMap[view] = url
-                            }
-                            injectLongClickListener(view)
-                        }
-                    }
-                }
-            )
-        }
-
-        val simpleDraweeViewClass = XposedHelpers.findClassIfExists(
-            "com.facebook.drawee.view.SimpleDraweeView",
-            classLoader
-        )
-        if (simpleDraweeViewClass != null) {
-            // Hook setImageURI
-            XposedBridge.hookAllMethods(
-                simpleDraweeViewClass,
-                "setImageURI",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        runCatching {
-                            val view = param.thisObject as? View ?: return
-                            for (arg in param.args) {
-                                when (arg) {
-                                    is Uri -> viewToUrlMap[view] = arg.toString()
-                                    is String -> if (arg.startsWith("http")) viewToUrlMap[view] = arg
-                                }
-                            }
-                            injectLongClickListener(view)
-                        }
-                    }
-                }
-            )
-            XposedBridge.log("[$TAG] Hooked SimpleDraweeView successfully")
-        }
-    }
-
-    /**
-     * Hook ByteDance Lighten (thư viện tải ảnh nội bộ của ByteDance/TikTok)
-     */
-    private fun hookByteDanceLighten(classLoader: ClassLoader) {
+    private fun hookSmartImageView(classLoader: ClassLoader) {
         val smartImageViewClass = XposedHelpers.findClassIfExists(
             "com.bytedance.lighten.loader.SmartImageView",
             classLoader
-        ) ?: return
+        )
 
-        XposedBridge.log("[$TAG] Found SmartImageView, hooking loader methods...")
+        if (smartImageViewClass == null) {
+            log("SmartImageView class not found in current classLoader")
+            return
+        }
 
-        // Hook tất cả phương thức nhận Uri/String/UrlModel để load ảnh
-        smartImageViewClass.declaredMethods.forEach { method ->
-            if (method.name in listOf("load", "setImageURI", "displayImage", "setController")) {
-                runCatching {
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            runCatching {
+        log("Found SmartImageView: ${smartImageViewClass.name}, injecting hooks...")
+
+        // 1. Hook tất cả constructor của SmartImageView để tiêm listener sớm
+        runCatching {
+            XposedBridge.hookAllConstructors(smartImageViewClass, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val view = param.thisObject as? View ?: return
+                    injectInteraction(view)
+                }
+            })
+        }
+
+        // 2. Hook onAttachedToWindow
+        runCatching {
+            XposedBridge.hookAllMethods(smartImageViewClass, "onAttachedToWindow", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val view = param.thisObject as? View ?: return
+                    injectInteraction(view)
+                }
+            })
+        }
+
+        // 3. Duyệt toàn bộ phân cấp lớp: SmartImageView -> LX/04nV (SimpleDraweeView) -> LX/04nU -> LX/04nT (DraweeView)
+        var currentClass: Class<*>? = smartImageViewClass
+        var hookedMethodsCount = 0
+
+        while (currentClass != null && currentClass != ImageView::class.java && currentClass != View::class.java && currentClass != Any::class.java) {
+            for (method in currentClass.declaredMethods) {
+                if (Modifier.isStatic(method.modifiers)) continue
+
+                // Hook tất cả phương thức nhận 1 tham số (bao gồm LIZ(LX/09bU), setImageURI, v.v.)
+                if (method.parameterTypes.size == 1) {
+                    runCatching {
+                        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
                                 val view = param.thisObject as? View ?: return
-                                for (arg in param.args) {
-                                    when (arg) {
-                                        is Uri -> viewToUrlMap[view] = arg.toString()
-                                        is String -> if (arg.startsWith("http")) viewToUrlMap[view] = arg
-                                        else -> if (arg != null) {
-                                            extractUrlFromByteDanceModel(arg)?.let { viewToUrlMap[view] = it }
-                                        }
-                                    }
+                                val arg = param.args.firstOrNull() ?: return
+                                val url = extractUrlFromObject(arg)
+                                if (!url.isNullOrBlank()) {
+                                    viewToUrlMap[view] = url
+                                    log("Captured URL from ${view.javaClass.simpleName}.${method.name}: $url")
                                 }
-                                injectLongClickListener(view)
+                                injectInteraction(view)
                             }
-                        }
-                    })
+                        })
+                        hookedMethodsCount++
+                    }
                 }
             }
+            currentClass = currentClass.superclass
         }
+
+        log("Successfully hooked $hookedMethodsCount loader methods across SmartImageView hierarchy")
     }
 
     // =========================================================================
     // TẦNG 2: CAN THIỆP SỰ KIỆN TƯƠNG TÁC (LONG CLICK TRIGGER)
     // =========================================================================
 
-    /**
-     * Hook View.setOnLongClickListener để bọc listener gốc, đảm bảo không phá vỡ logic TikTok
-     */
     private fun hookViewInteraction(classLoader: ClassLoader) {
+        // Hook View.setOnLongClickListener để bọc listener gốc
         XposedBridge.hookAllMethods(
             View::class.java,
             "setOnLongClickListener",
@@ -270,16 +163,38 @@ class MainHook : IXposedHookLoadPackage {
                     runCatching {
                         val view = param.thisObject as? View ?: return
                         val className = view.javaClass.name
-                        if (className.contains("DraweeView") || className.contains("SmartImageView") || className.contains("ImageView")) {
+
+                        // Bọc listener nếu là SmartImageView, DraweeView hoặc ViewGroup (comment row)
+                        val isCandidateView = className.contains("SmartImageView") ||
+                                className.contains("DraweeView") ||
+                                className.contains("04n") ||
+                                view is ViewGroup
+
+                        if (isCandidateView) {
                             val originalListener = param.args.firstOrNull() as? View.OnLongClickListener
                             param.args[0] = View.OnLongClickListener { v ->
+                                // 1. Kiểm tra trực tiếp trên View được click
                                 val stickerUrl = extractUrlFromView(v)
                                 if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
+                                    log("Intercepted long click on sticker view: $v, URL: $stickerUrl")
                                     showStickerOptionsDialog(v, stickerUrl)
-                                    true
-                                } else {
-                                    originalListener?.onLongClick(v) ?: false
+                                    return@OnLongClickListener true
                                 }
+
+                                // 2. Nếu là ViewGroup (dòng bình luận), quét các view con tìm SmartImageView chứa sticker
+                                if (v is ViewGroup) {
+                                    val childSticker = findStickerViewInChildren(v)
+                                    if (childSticker != null) {
+                                        val childUrl = extractUrlFromView(childSticker)
+                                        if (!childUrl.isNullOrBlank() && isStickerCandidate(childSticker, childUrl)) {
+                                            log("Intercepted long click on comment parent containing sticker: $childUrl")
+                                            showStickerOptionsDialog(childSticker, childUrl)
+                                            return@OnLongClickListener true
+                                        }
+                                    }
+                                }
+
+                                originalListener?.onLongClick(v) ?: false
                             }
                         }
                     }
@@ -289,14 +204,16 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Tiêm OnLongClickListener vào View nếu chưa có listener được set
+     * Tiêm OnLongClickListener chủ động vào View
      */
-    private fun injectLongClickListener(view: View) {
+    private fun injectInteraction(view: View) {
         runCatching {
+            view.isClickable = true
             view.isLongClickable = true
             view.setOnLongClickListener { v ->
                 val stickerUrl = extractUrlFromView(v)
                 if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
+                    log("Long click triggered on injected listener: $stickerUrl")
                     showStickerOptionsDialog(v, stickerUrl)
                     true
                 } else {
@@ -307,72 +224,160 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * Trích xuất URL từ View kết hợp WeakHashMap và Reflection fallback
+     * Quét đệ quy ViewGroup để tìm SmartImageView chứa sticker
+     */
+    private fun findStickerViewInChildren(group: ViewGroup): View? {
+        for (i in 0 until group.childCount) {
+            val child = group.getChildAt(i)
+            val name = child.javaClass.name
+            if (name.contains("SmartImageView") || name.contains("04n")) {
+                val url = extractUrlFromView(child)
+                if (!url.isNullOrBlank() && isStickerCandidate(child, url)) {
+                    return child
+                }
+            } else if (child is ViewGroup) {
+                val found = findStickerViewInChildren(child)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    /**
+     * Trích xuất URL từ View kết hợp WeakHashMap, getImageUri() và Reflection fallback
      */
     private fun extractUrlFromView(view: View): String? {
-        // 1. Tìm trong WeakHashMap trực tiếp
+        // 1. WeakHashMap lookup
         viewToUrlMap[view]?.let { return it }
 
-        // 2. Reflection fallback qua DraweeController
+        // 2. Gọi getImageUri() phản chiếu từ LX/04nV (SimpleDraweeView)
+        runCatching {
+            val getImageUriMethod = view.javaClass.getMethod("getImageUri")
+            val uri = getImageUriMethod.invoke(view) as? Uri
+            if (uri != null) {
+                val s = uri.toString()
+                if (s.startsWith("http://") || s.startsWith("https://")) {
+                    viewToUrlMap[view] = s
+                    return s
+                }
+            }
+        }
+
+        // 3. Quét các trường của View và các lớp cha
+        runCatching {
+            var cls: Class<*>? = view.javaClass
+            while (cls != null && cls != View::class.java && cls != Any::class.java) {
+                for (field in cls.declaredFields) {
+                    field.isAccessible = true
+                    val value = field.get(view) ?: continue
+                    val url = extractUrlFromObject(value)
+                    if (!url.isNullOrBlank()) {
+                        viewToUrlMap[view] = url
+                        return url
+                    }
+                }
+                cls = cls.superclass
+            }
+        }
+
+        // 4. Controller lookup
         runCatching {
             val getController = view.javaClass.getMethod("getController")
             val controller = getController.invoke(view)
             if (controller != null) {
                 controllerToUrlMap[controller]?.let { return it }
-                // Quét qua các trường của controller
-                var currentClass: Class<*>? = controller.javaClass
-                while (currentClass != null && currentClass != Any::class.java) {
-                    for (field in currentClass.declaredFields) {
-                        field.isAccessible = true
-                        val value = field.get(controller) ?: continue
-                        if (value is Uri) return value.toString()
-                        if (value is String && (value.startsWith("http://") || value.startsWith("https://"))) return value
-                        requestToUrlMap[value]?.let { return it }
-                    }
-                    currentClass = currentClass.superclass
+                val url = extractUrlFromObject(controller)
+                if (!url.isNullOrBlank()) {
+                    controllerToUrlMap[controller] = url
+                    return url
                 }
             }
         }
 
-        // 3. Fallback qua Tag của View
+        // 5. View tag
         val tag = view.tag
-        if (tag is String && (tag.startsWith("http://") || tag.startsWith("https://"))) {
-            return tag
-        } else if (tag != null) {
-            extractUrlFromByteDanceModel(tag)?.let { return it }
+        if (tag != null) {
+            val url = extractUrlFromObject(tag)
+            if (!url.isNullOrBlank()) return url
         }
 
         return null
     }
 
     /**
-     * Lọc ứng viên sticker dựa vào URL và kích thước View
+     * Trích xuất URL từ bất kỳ đối tượng nào (Uri, String, Model, Controller, ImageRequest, Options)
+     */
+    private fun extractUrlFromObject(obj: Any): String? {
+        if (obj is Uri) {
+            val s = obj.toString()
+            if (s.startsWith("http://") || s.startsWith("https://")) return s
+        }
+        if (obj is String) {
+            if (obj.startsWith("http://") || obj.startsWith("https://")) return obj
+        }
+
+        // Quét các trường của đối tượng
+        runCatching {
+            for (field in obj.javaClass.declaredFields) {
+                field.isAccessible = true
+                val v = field.get(obj) ?: continue
+                when (v) {
+                    is Uri -> {
+                        val s = v.toString()
+                        if (s.startsWith("http://") || s.startsWith("https://")) return s
+                    }
+                    is String -> {
+                        if (v.startsWith("http://") || v.startsWith("https://")) return v
+                    }
+                    is List<*> -> {
+                        val first = v.firstOrNull()?.toString()
+                        if (!first.isNullOrBlank() && (first.startsWith("http://") || first.startsWith("https://"))) {
+                            return first
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Lọc ứng viên sticker: phân biệt với avatar người dùng
      */
     private fun isStickerCandidate(view: View, url: String): Boolean {
         val lowerUrl = url.lowercase()
-        val isCdnUrl = lowerUrl.contains("tiktokcdn.com") ||
-                lowerUrl.contains("byteimg.com") ||
-                lowerUrl.contains("ibyteimg.com") ||
-                lowerUrl.contains("sticker") ||
+        if (!lowerUrl.startsWith("http")) return false
+
+        // Loại trừ avatar profile trong comment
+        if (lowerUrl.contains("avatar") || lowerUrl.contains("/user/")) {
+            return false
+        }
+
+        val isCdn = lowerUrl.contains("tiktokcdn") ||
+                lowerUrl.contains("byteimg") ||
+                lowerUrl.contains("ibyteimg") ||
+                lowerUrl.contains("byteoversea") ||
+                lowerUrl.contains("tiktok")
+
+        val isImageFormat = lowerUrl.contains(".webp") ||
+                lowerUrl.contains(".gif") ||
+                lowerUrl.contains(".png") ||
+                lowerUrl.contains(".jpeg") ||
+                lowerUrl.contains(".jpg")
+
+        val isStickerKeyword = lowerUrl.contains("sticker") ||
                 lowerUrl.contains("emoji") ||
-                lowerUrl.contains(".webp") ||
-                lowerUrl.contains(".gif")
+                lowerUrl.contains("im_") ||
+                lowerUrl.contains("animate") ||
+                lowerUrl.contains("comment")
 
-        // Kích thước sticker trong bình luận thường >= 48dp, tránh nhầm lẫn với icon nhỏ hoặc avatar thu nhỏ
-        val w = view.width
-        val h = view.height
-        val isProperSize = if (w > 0 && h > 0) (w >= 48 && h >= 48) else true
-
-        return isCdnUrl && isProperSize
+        return isCdn || isImageFormat || isStickerKeyword
     }
 
     // =========================================================================
     // GIAO DIỆN & TÁC VỤ: DIALOG, DOWNLOAD, TELEGRAM SHARE
     // =========================================================================
 
-    /**
-     * Hiển thị AlertDialog với 3 tùy chọn hành động
-     */
     private fun showStickerOptionsDialog(view: View, url: String) {
         val activity = getActivityFromView(view) ?: return
         activity.runOnUiThread {
@@ -395,14 +400,11 @@ class MainHook : IXposedHookLoadPackage {
                     .setNegativeButton("Hủy", null)
                     .show()
             }.onFailure {
-                XposedBridge.log("[$TAG] Failed to show dialog: ${it.message}")
+                log("Failed to show dialog: ${it.message}")
             }
         }
     }
 
-    /**
-     * Tải sticker trên luồng phụ và lưu vào storage hoặc chuyển tiếp sang Telegram
-     */
     private fun executeDownloadSticker(activity: Activity, url: String, shareToTelegram: Boolean) {
         showToast(activity, if (shareToTelegram) "Đang chuẩn bị sticker..." else "Đang tải sticker...")
 
@@ -434,12 +436,10 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 if (shareToTelegram) {
-                    // Lưu vào cache tạm thời của TikTok để share
                     val tempFile = File(activity.cacheDir, "shared_sticker_${System.currentTimeMillis()}.$extension")
                     tempFile.writeBytes(bytes)
                     shareFileToTelegram(activity, tempFile, extension)
                 } else {
-                    // Lưu vào thư mục công khai Pictures/TikTokStickers/
                     val targetDir = File(
                         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
                         "TikTokStickers"
@@ -451,27 +451,23 @@ class MainHook : IXposedHookLoadPackage {
 
                     val mimeType = if (extension == "gif") "image/gif" else "image/webp"
 
-                    // Scan file vào MediaStore
                     MediaScannerConnection.scanFile(
                         activity,
                         arrayOf(destFile.absolutePath),
                         arrayOf(mimeType)
                     ) { path, uri ->
-                        XposedBridge.log("[$TAG] Scanned into gallery: $path -> $uri")
+                        log("Scanned into gallery: $path -> $uri")
                     }
 
                     showToast(activity, "Đã lưu vào Pictures/TikTokStickers/${destFile.name}")
                 }
             }.onFailure { err ->
-                XposedBridge.log("[$TAG] Error downloading sticker: ${err.message}")
+                log("Error downloading sticker: ${err.message}")
                 showToast(activity, "Lỗi khi xử lý sticker: ${err.localizedMessage}")
             }
         }.start()
     }
 
-    /**
-     * Chia sẻ file sang Telegram thông qua Intent ACTION_SEND
-     */
     private fun shareFileToTelegram(activity: Activity, file: File, extension: String) {
         activity.runOnUiThread {
             runCatching {
@@ -485,7 +481,6 @@ class MainHook : IXposedHookLoadPackage {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
 
-                // Kiểm tra ứng dụng Telegram đã cài đặt chưa
                 val isTelegramInstalled = runCatching {
                     activity.packageManager.getPackageInfo(TELEGRAM_PACKAGE, 0)
                     true
@@ -494,21 +489,17 @@ class MainHook : IXposedHookLoadPackage {
                 if (isTelegramInstalled) {
                     activity.startActivity(sendIntent)
                 } else {
-                    // Fallback: Mở trình chọn chia sẻ hệ thống nếu Telegram chính thức chưa cài đặt
                     sendIntent.setPackage(null)
                     val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
                     activity.startActivity(chooser)
                 }
             }.onFailure {
-                XposedBridge.log("[$TAG] Failed to share to Telegram: ${it.message}")
+                log("Failed to share to Telegram: ${it.message}")
                 showToast(activity, "Không thể mở Telegram: ${it.localizedMessage}")
             }
         }
     }
 
-    /**
-     * Sao chép URL vào Clipboard
-     */
     private fun copyUrlToClipboard(activity: Activity, url: String) {
         val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         if (clipboard != null) {
@@ -519,12 +510,9 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     // =========================================================================
-    // TIỆN ÍCH HỖ TRỢ (HELPERS & BINARY HEADER PARSING)
+    // TIỆN ÍCH HỖ TRỢ
     // =========================================================================
 
-    /**
-     * Kiểm tra header WebP chuẩn (RIFF .... WEBP)
-     */
     private fun isWebpHeader(bytes: ByteArray): Boolean {
         if (bytes.size < 12) return false
         val riff = bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
@@ -534,9 +522,6 @@ class MainHook : IXposedHookLoadPackage {
         return riff && webp
     }
 
-    /**
-     * Kiểm tra Animated WebP: chunk 'VP8X' và bit Animation (0x02) tại flags byte (offset 20)
-     */
     private fun isAnimatedWebPHeader(bytes: ByteArray): Boolean {
         if (!isWebpHeader(bytes) || bytes.size < 21) return false
         val vp8x = bytes[12] == 'V'.code.toByte() && bytes[13] == 'P'.code.toByte() &&
@@ -546,27 +531,18 @@ class MainHook : IXposedHookLoadPackage {
         return (flags and 0x02) != 0
     }
 
-    /**
-     * Kiểm tra header định dạng GIF (GIF87a / GIF89a)
-     */
     private fun isGifHeader(bytes: ByteArray): Boolean {
         if (bytes.size < 6) return false
         val magic = String(bytes, 0, 6, StandardCharsets.US_ASCII)
         return magic.startsWith("GIF87a") || magic.startsWith("GIF89a")
     }
 
-    /**
-     * Kiểm tra header PNG
-     */
     private fun isPngHeader(bytes: ByteArray): Boolean {
         if (bytes.size < 8) return false
         return bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
     }
 
-    /**
-     * Tìm kiếm Activity từ View Context (duyệt qua ContextWrapper)
-     */
     private fun getActivityFromView(view: View): Activity? {
         var context = view.context
         while (context is ContextWrapper) {
@@ -576,9 +552,6 @@ class MainHook : IXposedHookLoadPackage {
         return null
     }
 
-    /**
-     * Lấy URI chia sẻ an toàn: tìm FileProvider của TikTok hoặc dùng StrictMode fallback
-     */
     private fun resolveShareableUri(context: Context, file: File): Uri {
         return runCatching {
             val packageInfo = context.packageManager.getPackageInfo(
@@ -601,45 +574,11 @@ class MainHook : IXposedHookLoadPackage {
             }
             null
         }.getOrNull() ?: run {
-            // Tạm thời mở StrictMode để cho phép chia sẻ file URI cục bộ nếu không tìm thấy FileProvider
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().build())
             Uri.fromFile(file)
         }
     }
 
-    /**
-     * Trích xuất URI từ đối tượng ImageRequest của Fresco bằng reflection
-     */
-    private fun extractUriFromImageRequest(request: Any): String? {
-        return runCatching {
-            val method = request.javaClass.getMethod("getSourceUri")
-            (method.invoke(request) as? Uri)?.toString()
-        }.getOrNull()
-    }
-
-    /**
-     * Trích xuất URL từ model dữ liệu ByteDance (UrlModel / UrlStruct)
-     */
-    private fun extractUrlFromByteDanceModel(model: Any): String? {
-        // Kiểm tra phương thức getUrlList() trả về List<String>
-        runCatching {
-            val method = model.javaClass.getMethod("getUrlList")
-            val list = method.invoke(model) as? List<*>
-            val first = list?.firstOrNull()?.toString()
-            if (!first.isNullOrBlank() && first.startsWith("http")) return first
-        }
-        // Kiểm tra phương thức getUri() trả về String hoặc Uri
-        runCatching {
-            val method = model.javaClass.getMethod("getUri")
-            val uriStr = method.invoke(model)?.toString()
-            if (!uriStr.isNullOrBlank() && uriStr.startsWith("http")) return uriStr
-        }
-        return null
-    }
-
-    /**
-     * Hiển thị Toast thông báo trên Main Thread
-     */
     private fun showToast(activity: Activity, message: String) {
         Handler(Looper.getMainLooper()).post {
             Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
