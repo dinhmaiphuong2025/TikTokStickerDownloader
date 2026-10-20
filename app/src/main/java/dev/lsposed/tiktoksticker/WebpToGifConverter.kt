@@ -91,6 +91,11 @@ object WebpToGifConverter {
                     canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
 
                     val rendered = renderFrame(frame, width, height, frameBitmap)
+                    if (!rendered) {
+                        Log.w(TAG, "Frame $i: renderFrame returned false")
+                        invokeVoid(frame, "dispose")
+                        return@runCatching
+                    }
 
                     val delay = if (i < durations.size && durations[i] > 0) durations[i] * step else 60 * step
                     encoder.setDelay(delay)
