@@ -246,14 +246,32 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        val name = view.javaClass.name
-        if (name.contains("SmartImageView") || name.contains("04n") || name.contains("DraweeView")) {
+        // Nhận diện view sticker bằng 2 tín hiệu:
+        // 1. View đã có URL bắt được trong viewToUrlMap (chính xác nhất)
+        // 2. View thuộc phân cấp SmartImageView (đi ngược superclass, chống obfuscate tên class con)
+        if (viewToUrlMap.containsKey(view) || isSmartImageViewLike(view)) {
             val url = extractUrlFromView(view)
             if (!url.isNullOrBlank() && isStickerCandidate(view, url)) {
                 return view
             }
         }
         return null
+    }
+
+    /**
+     * Kiểm tra view có thuộc cây kế thừa SmartImageView/DraweeView không (bất kể tên class con bị obfuscate)
+     */
+    private fun isSmartImageViewLike(view: View): Boolean {
+        var cls: Class<*>? = view.javaClass
+        while (cls != null && cls != View::class.java && cls != Any::class.java) {
+            val n = cls.name
+            if (n.contains("SmartImageView") || n.contains("04n") ||
+                n.contains("DraweeView") || n.contains("lighten")) {
+                return true
+            }
+            cls = cls.superclass
+        }
+        return false
     }
 
     // =========================================================================
