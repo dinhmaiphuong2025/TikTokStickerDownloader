@@ -182,9 +182,10 @@ class AnimatedGifEncoder {
                     transparentColor = Color.MAGENTA
                     transparent = transparentColor
                 }
-                pixels!![count++] = Color.blue(transparentColor).toByte()
-                pixels!![count++] = Color.green(transparentColor).toByte()
-                pixels!![count++] = Color.red(transparentColor).toByte()
+                val tColor = transparentColor ?: Color.MAGENTA
+                pixels!![count++] = Color.blue(tColor).toByte()
+                pixels!![count++] = Color.green(tColor).toByte()
+                pixels!![count++] = Color.red(tColor).toByte()
             } else {
                 pixels!![count++] = Color.blue(rgb).toByte()
                 pixels!![count++] = Color.green(rgb).toByte()
