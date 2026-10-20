@@ -154,7 +154,7 @@ object WebpToGifConverter {
 
     private fun invokeFrame(webpImage: Any, index: Int): Any? {
         return runCatching {
-            val m = findMethod(webpImage.javaClass, "getFrame", Int::class.javaPrimitiveType)
+            val m = findMethod(webpImage.javaClass, "getFrame", Integer.TYPE)
             m.invoke(webpImage, index)
         }.getOrNull()
     }
@@ -162,13 +162,13 @@ object WebpToGifConverter {
     private fun renderFrame(frame: Any, width: Int, height: Int, bitmap: Bitmap): Boolean {
         // Thử renderFrame trước
         runCatching {
-            val m = findMethod(frame.javaClass, "renderFrame", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Bitmap::class.java)
+            val m = findMethod(frame.javaClass, "renderFrame", Integer.TYPE, Integer.TYPE, Bitmap::class.java)
             m.invoke(frame, width, height, bitmap)
             return true
         }
         // Thử nativeRenderFrame
         runCatching {
-            val m = findMethod(frame.javaClass, "nativeRenderFrame", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Bitmap::class.java)
+            val m = findMethod(frame.javaClass, "nativeRenderFrame", Integer.TYPE, Integer.TYPE, Bitmap::class.java)
             m.invoke(frame, width, height, bitmap)
             return true
         }
