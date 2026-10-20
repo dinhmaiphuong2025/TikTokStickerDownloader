@@ -66,7 +66,8 @@ class MainHook : IXposedHookLoadPackage {
         private val viewToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
         private val controllerToUrlMap = Collections.synchronizedMap(WeakHashMap<Any, String>())
 
-        private val mainHandler = Handler(Looper.getMainLooper())
+        // Lazy để tránh khởi tạo Handler trong <clinit> (chạy trước khi main looper sẵn sàng khi Zygote fork)
+        private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
 
         private fun log(msg: String) {
             Log.d(TAG, msg)
