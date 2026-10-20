@@ -179,26 +179,26 @@ class TikTokBottomSheet(
         })
 
         // 3. Danh sách Action Items
-        // Action 1: Tải Sticker gốc (.webp / .gif)
+        // Action 1: Lưu vào máy
         val downloadItem = createActionRow(
             badgeBgColor = "#2A1620",
             badgeTextColor = "#FE2C55",
             badgeGlyph = "↓",
             title = "Lưu vào máy",
-            desc = "Tải file gốc (.webp / .gif) vào Thư viện ảnh"
+            desc = "Tải file gốc (.webp) và bản GIF động"
         ) {
             dialog.dismiss()
             onDownloadOriginal()
         }
         sheetCard.addView(downloadItem)
 
-        // Action 2: Gửi sang Telegram (GIF động)
+        // Action 2: Gửi sang Telegram (Nekogram)
         val telegramItem = createActionRow(
             badgeBgColor = "#142536",
             badgeTextColor = "#2AABEE",
             badgeGlyph = "➤",
-            title = "Gửi sang Telegram (GIF động)",
-            desc = "Chuyển thành GIF động lặp vô tận, không bị đóng băng"
+            title = "Gửi sang Telegram / Nekogram",
+            desc = "Gửi sticker trực tiếp vào cuộc trò chuyện"
         ) {
             progressLayout.visibility = View.VISIBLE
             downloadItem.visibility = View.GONE

@@ -608,24 +608,15 @@ class MainHook : IXposedHookLoadPackage {
                     clipData = ClipData.newRawUri("sticker", fileUri)
                 }
 
-                val pm = activity.packageManager
                 val tgPackage = resolveTelegramPackage(activity)
-                var started = false
-
                 if (tgPackage != null) {
-                    // Giới hạn theo package rồi resolve chính xác component để tránh ActivityNotFoundException
                     sendIntent.setPackage(tgPackage)
-                    val resolved = sendIntent.resolveActivity(pm)
-                    if (resolved != null) {
-                        sendIntent.component = resolved
-                        activity.startActivity(sendIntent)
-                        started = true
-                    } else {
-                        sendIntent.setPackage(null)
-                    }
                 }
 
-                if (!started) {
+                runCatching {
+                    activity.startActivity(sendIntent)
+                }.onFailure {
+                    sendIntent.setPackage(null)
                     val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
                     activity.startActivity(chooser)
                 }

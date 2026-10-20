@@ -80,6 +80,8 @@ class AnimatedGifEncoder {
             writePixels()
             firstFrame = false
             true
+        }.onFailure {
+            android.util.Log.e("TikTokStickerHook", "addFrame failed: ${it.javaClass.simpleName}: ${it.message}", it)
         }.getOrDefault(false)
     }
 
@@ -110,6 +112,7 @@ class AnimatedGifEncoder {
         indexedPixels = ByteArray(nPix)
         val nq = NeuQuant(pixels!!, len, sample)
         colorTab = nq.process()
+        usedEntry = BooleanArray(256)
 
         var k = 0
         for (i in 0 until nPix) {
@@ -139,12 +142,15 @@ class AnimatedGifEncoder {
         val len = colorTab!!.size
         var i = 0
         while (i < len) {
-            val dr = r - (colorTab!![i++].toInt() and 0xff)
-            val dg = g - (colorTab!![i++].toInt() and 0xff)
-            val db = b - (colorTab!![i++].toInt() and 0xff)
-            val d = dr * dr + dg * dg + db * db
             val index = i / 3
-            if (usedEntry[index] && (d < dmin)) {
+            val cr = colorTab!![i++].toInt() and 0xff
+            val cg = colorTab!![i++].toInt() and 0xff
+            val cb = colorTab!![i++].toInt() and 0xff
+            val dr = r - cr
+            val dg = g - cg
+            val db = b - cb
+            val d = dr * dr + dg * dg + db * db
+            if (index < usedEntry.size && usedEntry[index] && (d < dmin)) {
                 dmin = d
                 minpos = index
             }
@@ -172,7 +178,7 @@ class AnimatedGifEncoder {
             val a = Color.alpha(rgb)
             if (a < 128) {
                 hasAlpha = true
-                if (transparentColor == null) {
+                if (firstFrame) {
                     transparentColor = Color.MAGENTA
                     transparent = transparentColor
                 }
