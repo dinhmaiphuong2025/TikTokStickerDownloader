@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TikTok Sticker Downloader</string>
+    <string name="xposed_description">Tải trực tiếp sticker/GIF động trong bình luận TikTok và chia sẻ sang Telegram</string>
+</resources>
