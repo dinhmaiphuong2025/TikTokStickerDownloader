@@ -1,13 +1,13 @@
 package dev.lsposed.tiktoksticker
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Environment
@@ -36,6 +36,7 @@ import java.util.WeakHashMap
 /**
  * TikTokStickerDownloader - LSPosed Module
  * Hỗ trợ tải sticker động (.webp / .gif) từ bình luận TikTok hoặc chia sẻ sang Telegram.
+ * Tích hợp bộ chuyển đổi WebP -> GIF động và giao diện BottomSheet chuẩn TikTok Tux Design.
  */
 class MainHook : IXposedHookLoadPackage {
 
@@ -59,9 +60,12 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
+    private var appClassLoader: ClassLoader? = null
+
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName !in TARGET_PACKAGES) return
 
+        appClassLoader = lpparam.classLoader
         log("Initializing hook on target package: ${lpparam.packageName} (process: ${lpparam.processName})")
 
         // Hook ByteDance Lighten (SmartImageView & superclasses LX/04nV...)
@@ -164,7 +168,6 @@ class MainHook : IXposedHookLoadPackage {
                         val view = param.thisObject as? View ?: return
                         val className = view.javaClass.name
 
-                        // Bọc listener nếu là SmartImageView, DraweeView hoặc ViewGroup (comment row)
                         val isCandidateView = className.contains("SmartImageView") ||
                                 className.contains("DraweeView") ||
                                 className.contains("04n") ||
@@ -177,7 +180,7 @@ class MainHook : IXposedHookLoadPackage {
                                 val stickerUrl = extractUrlFromView(v)
                                 if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
                                     log("Intercepted long click on sticker view: $v, URL: $stickerUrl")
-                                    showStickerOptionsDialog(v, stickerUrl)
+                                    showTikTokStyleBottomSheet(v, stickerUrl)
                                     return@OnLongClickListener true
                                 }
 
@@ -188,7 +191,7 @@ class MainHook : IXposedHookLoadPackage {
                                         val childUrl = extractUrlFromView(childSticker)
                                         if (!childUrl.isNullOrBlank() && isStickerCandidate(childSticker, childUrl)) {
                                             log("Intercepted long click on comment parent containing sticker: $childUrl")
-                                            showStickerOptionsDialog(childSticker, childUrl)
+                                            showTikTokStyleBottomSheet(childSticker, childUrl)
                                             return@OnLongClickListener true
                                         }
                                     }
@@ -214,7 +217,7 @@ class MainHook : IXposedHookLoadPackage {
                 val stickerUrl = extractUrlFromView(v)
                 if (!stickerUrl.isNullOrBlank() && isStickerCandidate(v, stickerUrl)) {
                     log("Long click triggered on injected listener: $stickerUrl")
-                    showStickerOptionsDialog(v, stickerUrl)
+                    showTikTokStyleBottomSheet(v, stickerUrl)
                     true
                 } else {
                     false
@@ -375,99 +378,166 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     // =========================================================================
-    // GIAO DIỆN & TÁC VỤ: DIALOG, DOWNLOAD, TELEGRAM SHARE
+    // GIAO DIỆN TIKTOK BOTTOM SHEET & TÁC VỤ
     // =========================================================================
 
-    private fun showStickerOptionsDialog(view: View, url: String) {
+    /**
+     * Hiển thị BottomSheet chuẩn phong cách TikTok Tux Design
+     */
+    private fun showTikTokStyleBottomSheet(view: View, url: String) {
         val activity = getActivityFromView(view) ?: return
+        val previewDrawable: Drawable? = (view as? ImageView)?.drawable
+
         activity.runOnUiThread {
             runCatching {
-                val options = arrayOf(
-                    "Tải Sticker gốc (.webp / .gif)",
-                    "Chia sẻ sang Telegram",
-                    "Sao chép URL gốc"
+                var currentSheet: TikTokBottomSheet? = null
+
+                currentSheet = TikTokBottomSheet(
+                    activity = activity,
+                    previewDrawable = previewDrawable,
+                    onDownloadOriginal = {
+                        executeDownloadOriginal(activity, url)
+                    },
+                    onShareTelegramGif = { updateStatus ->
+                        executeShareTelegramGif(activity, url, updateStatus) {
+                            currentSheet?.dismiss()
+                        }
+                    },
+                    onCopyUrl = {
+                        copyUrlToClipboard(activity, url)
+                    }
                 )
 
-                AlertDialog.Builder(activity)
-                    .setTitle("TikTok Sticker Downloader")
-                    .setItems(options) { _, which ->
-                        when (which) {
-                            0 -> executeDownloadSticker(activity, url, shareToTelegram = false)
-                            1 -> executeDownloadSticker(activity, url, shareToTelegram = true)
-                            2 -> copyUrlToClipboard(activity, url)
-                        }
-                    }
-                    .setNegativeButton("Hủy", null)
-                    .show()
+                currentSheet.show()
             }.onFailure {
-                log("Failed to show dialog: ${it.message}")
+                log("Failed to show TikTokBottomSheet: ${it.message}")
             }
         }
     }
 
-    private fun executeDownloadSticker(activity: Activity, url: String, shareToTelegram: Boolean) {
-        showToast(activity, if (shareToTelegram) "Đang chuẩn bị sticker..." else "Đang tải sticker...")
+    /**
+     * Tải sticker gốc (.webp / .gif) vào Thư viện
+     */
+    private fun executeDownloadOriginal(activity: Activity, url: String) {
+        showToast(activity, "Đang tải sticker vào Thư viện...")
 
         Thread {
             runCatching {
-                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-                    connect()
-                }
-
-                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                    showToast(activity, "Lỗi HTTP: ${connection.responseCode}")
+                val bytes = fetchUrlBytes(url) ?: run {
+                    showToast(activity, "Không thể tải sticker từ CDN")
                     return@Thread
                 }
 
-                val bytes = connection.inputStream.use { it.readBytes() }
-                val isAnimatedWebp = isAnimatedWebPHeader(bytes)
-                val isGifFormat = isGifHeader(bytes)
-
-                val extension = when {
-                    isGifFormat -> "gif"
-                    isAnimatedWebp || isWebpHeader(bytes) -> "webp"
+                val isGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
+                val isWebp = isWebpHeader(bytes) || isAnimatedWebPHeader(bytes)
+                val ext = when {
+                    isGif -> "gif"
+                    isWebp -> "webp"
                     isPngHeader(bytes) -> "png"
-                    url.contains(".gif", ignoreCase = true) -> "gif"
                     else -> "webp"
                 }
 
-                if (shareToTelegram) {
-                    val tempFile = File(activity.cacheDir, "shared_sticker_${System.currentTimeMillis()}.$extension")
-                    tempFile.writeBytes(bytes)
-                    shareFileToTelegram(activity, tempFile, extension)
-                } else {
-                    val targetDir = File(
-                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                        "TikTokStickers"
-                    )
-                    if (!targetDir.exists()) targetDir.mkdirs()
+                val targetDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "TikTokStickers"
+                )
+                if (!targetDir.exists()) targetDir.mkdirs()
 
-                    val destFile = File(targetDir, "sticker_${System.currentTimeMillis()}.$extension")
-                    destFile.writeBytes(bytes)
+                val destFile = File(targetDir, "sticker_${System.currentTimeMillis()}.$ext")
+                destFile.writeBytes(bytes)
 
-                    val mimeType = if (extension == "gif") "image/gif" else "image/webp"
-
-                    MediaScannerConnection.scanFile(
-                        activity,
-                        arrayOf(destFile.absolutePath),
-                        arrayOf(mimeType)
-                    ) { path, uri ->
-                        log("Scanned into gallery: $path -> $uri")
-                    }
-
-                    showToast(activity, "Đã lưu vào Pictures/TikTokStickers/${destFile.name}")
+                val mimeType = if (ext == "gif") "image/gif" else "image/webp"
+                MediaScannerConnection.scanFile(
+                    activity,
+                    arrayOf(destFile.absolutePath),
+                    arrayOf(mimeType)
+                ) { path, uri ->
+                    log("Scanned into gallery: $path -> $uri")
                 }
+
+                showToast(activity, "Đã lưu vào Pictures/TikTokStickers/${destFile.name}")
             }.onFailure { err ->
-                log("Error downloading sticker: ${err.message}")
-                showToast(activity, "Lỗi khi xử lý sticker: ${err.localizedMessage}")
+                log("Error downloading original sticker: ${err.message}")
+                showToast(activity, "Lỗi khi lưu sticker: ${err.localizedMessage}")
             }
         }.start()
     }
 
+    /**
+     * Chuyển đổi WebP thành GIF động và gửi sang Telegram (không bị đóng băng)
+     */
+    private fun executeShareTelegramGif(
+        activity: Activity,
+        url: String,
+        updateStatus: (String) -> Unit,
+        onComplete: () -> Unit
+    ) {
+        Thread {
+            runCatching {
+                updateStatus("Đang tải dữ liệu sticker...")
+                val bytes = fetchUrlBytes(url) ?: run {
+                    showToast(activity, "Không thể tải sticker từ CDN")
+                    activity.runOnUiThread { onComplete() }
+                    return@Thread
+                }
+
+                val isAlreadyGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
+                val shareFile: File
+
+                if (isAlreadyGif) {
+                    shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.gif")
+                    shareFile.writeBytes(bytes)
+                } else {
+                    // Chuyển đổi Animated WebP -> Animated GIF
+                    updateStatus("Đang chuyển đổi sang GIF động...")
+                    val tempGif = File(activity.cacheDir, "telegram_sticker_${System.currentTimeMillis()}.gif")
+                    val cl = appClassLoader ?: activity.classLoader
+                    val ok = WebpToGifConverter.convertWebpToGif(bytes, tempGif, cl)
+                    if (ok && tempGif.exists() && tempGif.length() > 0) {
+                        shareFile = tempGif
+                    } else {
+                        // Fallback: giữ file WebP
+                        shareFile = File(activity.cacheDir, "shared_${System.currentTimeMillis()}.webp")
+                        shareFile.writeBytes(bytes)
+                    }
+                }
+
+                activity.runOnUiThread {
+                    onComplete()
+                    val ext = if (shareFile.name.endsWith(".gif")) "gif" else "webp"
+                    shareFileToTelegram(activity, shareFile, ext)
+                }
+            }.onFailure { err ->
+                log("Error preparing Telegram sticker: ${err.message}")
+                showToast(activity, "Lỗi: ${err.localizedMessage}")
+                activity.runOnUiThread { onComplete() }
+            }
+        }.start()
+    }
+
+    /**
+     * Tải byte array từ URL CDN
+     */
+    private fun fetchUrlBytes(url: String): ByteArray? {
+        return runCatching {
+            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 15000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
+                connect()
+            }
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                connection.inputStream.use { it.readBytes() }
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Chia sẻ file sang Telegram
+     */
     private fun shareFileToTelegram(activity: Activity, file: File, extension: String) {
         activity.runOnUiThread {
             runCatching {
@@ -505,7 +575,7 @@ class MainHook : IXposedHookLoadPackage {
         if (clipboard != null) {
             val clip = ClipData.newPlainText("TikTok Sticker URL", url)
             clipboard.setPrimaryClip(clip)
-            showToast(activity, "Đã sao chép URL gốc vào clipboard!")
+            showToast(activity, "Đã sao chép liên kết vào bộ nhớ tạm!")
         }
     }
 
