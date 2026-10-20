@@ -79,7 +79,12 @@ object WebpToGifConverter {
             val frameCount = getFrameCount.invoke(webpImage) as Int
             val durations = (getFrameDurations.invoke(webpImage) as? IntArray) ?: IntArray(frameCount) { 60 }
 
-            if (frameCount <= 0 || width <= 0 || height <= 0) return false
+            if (frameCount <= 0 || width <= 0 || height <= 0) {
+                Log.w(TAG, "Invalid dimensions: width=$width height=$height frameCount=$frameCount")
+                return false
+            }
+
+            Log.d(TAG, "WebPImage decoded: ${width}x$height, $frameCount frames, durations size=${durations.size}")
 
             val fos = FileOutputStream(outputFile)
             val encoder = AnimatedGifEncoder()
@@ -92,9 +97,14 @@ object WebpToGifConverter {
 
             // Giới hạn tối đa 60 frames để GIF gọn nhẹ và convert nhanh
             val step = if (frameCount > 60) (frameCount / 60) + 1 else 1
+            var addedFrames = 0
 
             for (i in 0 until frameCount step step) {
-                val frame = getFrame.invoke(webpImage, i) ?: continue
+                val frame = getFrame.invoke(webpImage, i)
+                if (frame == null) {
+                    Log.w(TAG, "getFrame($i) returned null")
+                    continue
+                }
                 runCatching {
                     val renderFrameMethod = frame.javaClass.getMethod(
                         "renderFrame",
@@ -106,13 +116,18 @@ object WebpToGifConverter {
 
                     val delay = if (i < durations.size) durations[i] * step else 60 * step
                     encoder.setDelay(delay)
-                    encoder.addFrame(frameBitmap)
+                    val ok = encoder.addFrame(frameBitmap)
+                    if (ok) addedFrames++ else Log.w(TAG, "addFrame($i) returned false")
 
                     // Giải phóng frame native
                     val disposeMethod = frame.javaClass.getMethod("dispose")
                     disposeMethod.invoke(frame)
+                }.onFailure { e ->
+                    Log.e(TAG, "Frame $i render failed: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
+
+            Log.d(TAG, "Added $addedFrames/$frameCount frames to GIF encoder")
 
             encoder.finish()
             fos.close()
