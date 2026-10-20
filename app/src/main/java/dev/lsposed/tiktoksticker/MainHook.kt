@@ -608,21 +608,14 @@ class MainHook : IXposedHookLoadPackage {
                     clipData = ClipData.newRawUri("sticker", fileUri)
                 }
 
-                val tgPackage = resolveTelegramPackage(activity)
-                if (tgPackage != null) {
-                    sendIntent.setPackage(tgPackage)
-                }
-
-                runCatching {
-                    activity.startActivity(sendIntent)
-                }.onFailure {
-                    sendIntent.setPackage(null)
-                    val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
-                    activity.startActivity(chooser)
-                }
+                // Luôn mở System Chooser để hiển thị đầy đủ các ứng dụng (Nekogram, Telegram, v.v.)
+                // Giúp người dùng chọn trực tiếp cuộc trò chuyện mong muốn mà không bị kẹt hay bị chặn
+                val chooser = Intent.createChooser(sendIntent, "Gửi sticker qua...")
+                chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                activity.startActivity(chooser)
             }.onFailure {
                 log("Failed to share to Telegram: ${it.message}")
-                showToast(activity, "Không thể mở Telegram: ${it.localizedMessage}")
+                showToast(activity, "Không thể mở trình chia sẻ: ${it.localizedMessage}")
             }
         }
     }

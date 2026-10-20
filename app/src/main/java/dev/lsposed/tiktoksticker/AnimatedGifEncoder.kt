@@ -119,7 +119,7 @@ class AnimatedGifEncoder {
             val r = pixels!![k++].toInt() and 0xff
             val g = pixels!![k++].toInt() and 0xff
             val b = pixels!![k++].toInt() and 0xff
-            val index = nq.map(b, g, r)
+            val index = nq.map(r, g, b)
             usedEntry[index] = true
             indexedPixels!![i] = index.toByte()
         }
@@ -183,13 +183,13 @@ class AnimatedGifEncoder {
                     transparent = transparentColor
                 }
                 val tColor = transparentColor ?: Color.MAGENTA
-                pixels!![count++] = Color.blue(tColor).toByte()
-                pixels!![count++] = Color.green(tColor).toByte()
                 pixels!![count++] = Color.red(tColor).toByte()
+                pixels!![count++] = Color.green(tColor).toByte()
+                pixels!![count++] = Color.blue(tColor).toByte()
             } else {
-                pixels!![count++] = Color.blue(rgb).toByte()
-                pixels!![count++] = Color.green(rgb).toByte()
                 pixels!![count++] = Color.red(rgb).toByte()
+                pixels!![count++] = Color.green(rgb).toByte()
+                pixels!![count++] = Color.blue(rgb).toByte()
             }
         }
         if (hasAlpha) {
@@ -460,7 +460,7 @@ class AnimatedGifEncoder {
             return colorTab
         }
 
-        fun map(b: Int, g: Int, r: Int): Int {
+        fun map(r: Int, g: Int, b: Int): Int {
             var bestd = 1000
             var best = -1
             var i = netindex[g]
@@ -470,7 +470,7 @@ class AnimatedGifEncoder {
                     val dist = network[i][1] - g
                     if (dist >= bestd) i = 256
                     else {
-                        val d = abs(network[i][0] - b) + abs(network[i][2] - r) + abs(dist)
+                        val d = abs(network[i][0] - r) + abs(network[i][2] - b) + abs(dist)
                         if (d < bestd) { bestd = d; best = network[i][3] }
                         i++
                     }
@@ -479,7 +479,7 @@ class AnimatedGifEncoder {
                     val dist = g - network[j][1]
                     if (dist >= bestd) j = -1
                     else {
-                        val d = abs(network[j][0] - b) + abs(network[j][2] - r) + abs(dist)
+                        val d = abs(network[j][0] - r) + abs(network[j][2] - b) + abs(dist)
                         if (d < bestd) { bestd = d; best = network[j][3] }
                         j--
                     }
@@ -541,12 +541,12 @@ class AnimatedGifEncoder {
             val step = if (lengthcount % 499 != 0) 499 * 3 else 503 * 3
             var pix = 0
             for (i in 0 until samplepixels) {
-                val b = (thepicture[pix].toInt() and 0xFF) shl 4
+                val r = (thepicture[pix].toInt() and 0xFF) shl 4
                 val g = (thepicture[pix + 1].toInt() and 0xFF) shl 4
-                val r = (thepicture[pix + 2].toInt() and 0xFF) shl 4
+                val b = (thepicture[pix + 2].toInt() and 0xFF) shl 4
                 var j = contest(b, g, r)
-                altersingle(alpha, j, b, g, r)
-                if (rad != 0) alterneigh(rad, j, b, g, r)
+                altersingle(alpha, j, r, g, b)
+                if (rad != 0) alterneigh(rad, j, r, g, b)
                 pix += step
                 if (pix >= lengthcount) pix -= lengthcount
             }

@@ -192,13 +192,13 @@ class TikTokBottomSheet(
         }
         sheetCard.addView(downloadItem)
 
-        // Action 2: Gửi sang Telegram (Nekogram)
+        // Action 2: Gửi sticker
         val telegramItem = createActionRow(
             badgeBgColor = "#142536",
             badgeTextColor = "#2AABEE",
             badgeGlyph = "➤",
-            title = "Gửi sang Telegram / Nekogram",
-            desc = "Gửi sticker trực tiếp vào cuộc trò chuyện"
+            title = "Chia sẻ sticker",
+            desc = "Chia sẻ qua Nekogram, Telegram hoặc ứng dụng khác"
         ) {
             progressLayout.visibility = View.VISIBLE
             downloadItem.visibility = View.GONE
