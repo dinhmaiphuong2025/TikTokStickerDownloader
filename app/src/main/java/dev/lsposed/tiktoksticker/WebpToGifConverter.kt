@@ -54,8 +54,19 @@ object WebpToGifConverter {
                 classLoader
             ) ?: return false
 
-            val createMethod = webPClass.getMethod("createFromByteArray", ByteArray::class.java)
-            val webpImage = createMethod.invoke(null, webpBytes) ?: return false
+            val webpImage = runCatching {
+                val m = webPClass.getMethod("create", ByteArray::class.java)
+                m.invoke(null, webpBytes)
+            }.recoverCatching {
+                val directBuf = java.nio.ByteBuffer.allocateDirect(webpBytes.size)
+                directBuf.put(webpBytes)
+                directBuf.flip()
+                val m = webPClass.getMethod("create", java.nio.ByteBuffer::class.java)
+                m.invoke(null, directBuf)
+            }.recoverCatching {
+                val m = webPClass.getMethod("createFromByteArray", ByteArray::class.java)
+                m.invoke(null, webpBytes)
+            }.getOrNull() ?: return false
 
             val getWidth = webPClass.getMethod("getWidth")
             val getHeight = webPClass.getMethod("getHeight")
