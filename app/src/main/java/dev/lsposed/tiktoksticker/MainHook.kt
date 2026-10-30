@@ -540,7 +540,7 @@ class MainHook : IXposedHookLoadPackage {
 
                 activity.runOnUiThread {
                     onFinish()
-                    shareFileToTelegramBot(activity, uri, ext)
+                    shareFileToChooser(activity, uri, ext)
                 }
             }.onFailure { err ->
                 log("Error sending to Telegram bot: ${err.message}")
@@ -637,7 +637,7 @@ class MainHook : IXposedHookLoadPackage {
 
                     activity.runOnUiThread {
                         onFinish()
-                        shareFileToTelegramBot(activity, uri, "webm")
+                        shareFileToTelegramDirect(activity, uri, "webm")
                     }
                 } else {
                     webmFile.delete()
@@ -746,7 +746,39 @@ class MainHook : IXposedHookLoadPackage {
         return null
     }
 
-    private fun shareFileToTelegramBot(activity: Activity, uri: Uri, extension: String) {
+    private fun shareFileToTelegramDirect(activity: Activity, uri: Uri, extension: String) {
+        activity.runOnUiThread {
+            runCatching {
+                val mimeType = when (extension.lowercase()) {
+                    "webm" -> "video/webm"
+                    "gif" -> "image/gif"
+                    "png" -> "image/png"
+                    "jpg", "jpeg" -> "image/jpeg"
+                    else -> "image/webp"
+                }
+
+                val targetPackage = resolveTelegramPackage(activity)
+                if (targetPackage != null) {
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        setPackage(targetPackage)
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                        clipData = ClipData.newRawUri("sticker", uri)
+                    }
+                    activity.startActivity(sendIntent)
+                } else {
+                    // Fallback sang chooser nếu không phát hiện được client Telegram nào
+                    shareFileToChooser(activity, uri, extension)
+                }
+            }.onFailure { err ->
+                log("Failed to share directly to Telegram: ${err.message}")
+                shareFileToChooser(activity, uri, extension)
+            }
+        }
+    }
+
+    private fun shareFileToChooser(activity: Activity, uri: Uri, extension: String) {
         activity.runOnUiThread {
             runCatching {
                 val mimeType = when (extension.lowercase()) {
@@ -768,15 +800,8 @@ class MainHook : IXposedHookLoadPackage {
                 chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 activity.startActivity(chooser)
             }.onFailure { err ->
-                log("Failed to share to Telegram: ${err.message}")
-                // Fallback mở thẳng chat bot bằng URL deeplink
-                runCatching {
-                    val botUri = Uri.parse("tg://resolve?domain=VideoStickerzBot")
-                    val viewIntent = Intent(Intent.ACTION_VIEW, botUri)
-                    activity.startActivity(viewIntent)
-                }.onFailure {
-                    showToast(activity, "Không thể mở Telegram: ${err.localizedMessage}")
-                }
+                log("Failed to open share chooser: ${err.message}")
+                showToast(activity, "Không thể mở trình chia sẻ: ${err.localizedMessage}")
             }
         }
     }
