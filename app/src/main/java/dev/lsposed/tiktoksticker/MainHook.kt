@@ -472,7 +472,13 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 val isGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
-                val ext = if (isGif) "gif" else "webp"
+                val isAnimatedWebp = isAnimatedWebPHeader(bytes)
+                val ext = when {
+                    isGif -> "gif"
+                    isAnimatedWebp || isWebpHeader(bytes) -> "webp"
+                    isPngHeader(bytes) -> "png"
+                    else -> "jpg"
+                }
 
                 val uri = saveStickerAndGetUri(activity, bytes, ext)
                 if (uri != null) {
@@ -517,7 +523,13 @@ class MainHook : IXposedHookLoadPackage {
 
                 updateStatus("Đang chuẩn bị gửi Telegram...")
                 val isGif = isGifHeader(bytes) || url.contains(".gif", ignoreCase = true)
-                val ext = if (isGif) "gif" else "webp"
+                val isAnimatedWebp = isAnimatedWebPHeader(bytes)
+                val ext = when {
+                    isGif -> "gif"
+                    isAnimatedWebp || isWebpHeader(bytes) -> "webp"
+                    isPngHeader(bytes) -> "png"
+                    else -> "jpg"
+                }
 
                 val uri = saveStickerAndGetUri(activity, bytes, ext)
                 if (uri == null) {
@@ -650,7 +662,13 @@ class MainHook : IXposedHookLoadPackage {
         bytes: ByteArray,
         extension: String
     ): Uri? {
-        val mimeType = if (extension.equals("webm", ignoreCase = true)) "video/webm" else "image/webp"
+        val mimeType = when (extension.lowercase()) {
+            "webm" -> "video/webm"
+            "gif" -> "image/gif"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            else -> "image/webp"
+        }
         val fileName = "sticker_${System.currentTimeMillis()}.$extension"
 
         // 1. Ghi qua MediaStore ContentResolver (chuẩn Android 10+ / Q trở lên)
@@ -731,7 +749,13 @@ class MainHook : IXposedHookLoadPackage {
     private fun shareFileToTelegramBot(activity: Activity, uri: Uri, extension: String) {
         activity.runOnUiThread {
             runCatching {
-                val mimeType = if (extension.equals("webm", ignoreCase = true)) "video/webm" else "image/webp"
+                val mimeType = when (extension.lowercase()) {
+                    "webm" -> "video/webm"
+                    "gif" -> "image/gif"
+                    "png" -> "image/png"
+                    "jpg", "jpeg" -> "image/jpeg"
+                    else -> "image/webp"
+                }
 
                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
                     type = mimeType

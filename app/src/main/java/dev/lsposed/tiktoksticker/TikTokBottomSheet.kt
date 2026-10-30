@@ -181,25 +181,25 @@ class TikTokBottomSheet(
         })
 
         // 3. Danh sách Action Items
-        // Action 1: Lưu Sticker gốc (.webp)
+        // Action 1: Lưu Sticker gốc
         val webpItem = createActionRow(
             badgeBgColor = "#2A1620",
             badgeTextColor = "#FE2C55",
-            badgeGlyph = "↓",
-            title = "Lưu Sticker (.webp)",
-            desc = "Tải file WebP gốc vào máy (Pictures/TikTokStickers)"
+            badgeGlyph = "⠿",
+            title = "Lưu Sticker gốc",
+            desc = "Lưu file ảnh gốc từ CDN vào máy (Pictures/TikTokStickers)"
         ) {
             dialog.dismiss()
             onSaveOriginalWebp()
         }
         sheetCard.addView(webpItem)
 
-        // Action 2: Chia sẻ sticker (WebP)
+        // Action 2: Chia sẻ sticker
         val shareItem = createActionRow(
             badgeBgColor = "#142536",
             badgeTextColor = "#2AABEE",
-            badgeGlyph = "➤",
-            title = "Chia sẻ sticker",
+            badgeGlyph = "⠶",
+            title = "Chia sẻ sticker gốc",
             desc = "Chia sẻ qua Telegram, Nekogram hoặc ứng dụng khác"
         ) {
             progressLayout.visibility = View.VISIBLE
@@ -214,7 +214,7 @@ class TikTokBottomSheet(
         val webmItem = createActionRow(
             badgeBgColor = "#1B2836",
             badgeTextColor = "#3897F0",
-            badgeGlyph = "▶",
+            badgeGlyph = "⣾",
             title = "Lưu Video Sticker (.webm)",
             desc = "Tự convert sang WebM VP9 (chuẩn 512px cho Telegram)"
         ) {
@@ -230,7 +230,7 @@ class TikTokBottomSheet(
         val shareWebmItem = createActionRow(
             badgeBgColor = "#16283C",
             badgeTextColor = "#00C7FF",
-            badgeGlyph = "🎬",
+            badgeGlyph = "⣻",
             title = "Gửi WebM vào Telegram (Bot)",
             desc = "Convert sang WebM và gửi vào bot để nhận ngay sticker"
         ) {
@@ -246,7 +246,7 @@ class TikTokBottomSheet(
         val copyItem = createActionRow(
             badgeBgColor = "#20222C",
             badgeTextColor = "#8A8B91",
-            badgeGlyph = "🔗",
+            badgeGlyph = "⠋",
             title = "Sao chép liên kết",
             desc = "Lưu đường dẫn CDN gốc vào bộ nhớ tạm"
         ) {
