@@ -424,6 +424,9 @@ class MainHook : IXposedHookLoadPackage {
                     onSaveWebm = { updateStatus, onFinish ->
                         executeSaveWebm(activity, url, updateStatus, onFinish)
                     },
+                    onShareWebmToTelegram = { updateStatus, onFinish ->
+                        executeShareWebmToTelegram(activity, url, updateStatus, onFinish)
+                    },
                     onCopyUrl = {
                         copyUrlToClipboard(activity, url)
                     }
@@ -580,6 +583,57 @@ class MainHook : IXposedHookLoadPackage {
                 activity.runOnUiThread { onFinish() }
             }.onFailure { err ->
                 log("Error saving WebM: ${err.message}")
+                showToast(activity, "Lỗi: ${err.localizedMessage}")
+                activity.runOnUiThread { onFinish() }
+            }
+        }.start()
+    }
+
+    /**
+     * 4. Gửi file WebM sang Telegram (Nekogram / Telegram chooser) để bot tạo Video Sticker
+     */
+    private fun executeShareWebmToTelegram(
+        activity: Activity,
+        url: String,
+        updateStatus: (String) -> Unit,
+        onFinish: () -> Unit
+    ) {
+        Thread {
+            runCatching {
+                updateStatus("Đang tải dữ liệu sticker...")
+                val bytes = fetchUrlBytes(url) ?: run {
+                    showToast(activity, "Không thể tải sticker từ CDN")
+                    activity.runOnUiThread { onFinish() }
+                    return@Thread
+                }
+
+                updateStatus("Đang convert sang WebM VP9 512px...")
+                val targetDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "TikTokStickers"
+                )
+                if (!targetDir.exists()) targetDir.mkdirs()
+
+                val baseName = "sticker_${System.currentTimeMillis()}"
+                val webmFile = File(targetDir, "$baseName.webm")
+                val cl = appClassLoader ?: activity.classLoader
+
+                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, webmFile, cl)
+                if (ok && webmFile.exists() && webmFile.length() > 500) {
+                    val uri = saveStickerAndGetUri(activity, webmFile.readBytes(), "webm")
+                        ?: resolveShareableUri(activity, webmFile)
+
+                    activity.runOnUiThread {
+                        onFinish()
+                        shareFileToTelegramBot(activity, uri, "webm")
+                    }
+                } else {
+                    webmFile.delete()
+                    showToast(activity, "Không thể convert WebM để gửi")
+                    activity.runOnUiThread { onFinish() }
+                }
+            }.onFailure { err ->
+                log("Error sharing WebM to Telegram: ${err.message}")
                 showToast(activity, "Lỗi: ${err.localizedMessage}")
                 activity.runOnUiThread { onFinish() }
             }

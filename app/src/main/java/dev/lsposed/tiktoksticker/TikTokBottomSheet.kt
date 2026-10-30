@@ -35,6 +35,7 @@ class TikTokBottomSheet(
     private val onSaveOriginalWebp: () -> Unit,
     private val onSendToTelegramBot: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
     private val onSaveWebm: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
+    private val onShareWebmToTelegram: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
     private val onCopyUrl: () -> Unit
 ) {
 
@@ -209,7 +210,7 @@ class TikTokBottomSheet(
         }
         sheetCard.addView(shareItem)
 
-        // Action 3: Lưu Video Sticker Telegram (.webm VP9 512px)
+        // Action 3: Lưu Video Sticker (.webm)
         val webmItem = createActionRow(
             badgeBgColor = "#1B2836",
             badgeTextColor = "#3897F0",
@@ -225,7 +226,23 @@ class TikTokBottomSheet(
         }
         sheetCard.addView(webmItem)
 
-        // Action 4: Sao chép URL
+        // Action 4: Gửi Video Sticker (.webm) vào Telegram (cho bot tạo sticker)
+        val shareWebmItem = createActionRow(
+            badgeBgColor = "#16283C",
+            badgeTextColor = "#00C7FF",
+            badgeGlyph = "🎬",
+            title = "Gửi WebM vào Telegram (Bot)",
+            desc = "Convert sang WebM và gửi vào bot để nhận ngay sticker"
+        ) {
+            progressLayout.visibility = View.VISIBLE
+            onShareWebmToTelegram(
+                { status -> activity.runOnUiThread { progressText.text = status } },
+                { dialog.dismiss() }
+            )
+        }
+        sheetCard.addView(shareWebmItem)
+
+        // Action 5: Sao chép URL
         val copyItem = createActionRow(
             badgeBgColor = "#20222C",
             badgeTextColor = "#8A8B91",
