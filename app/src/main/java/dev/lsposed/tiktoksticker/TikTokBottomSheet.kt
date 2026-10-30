@@ -32,9 +32,9 @@ import android.widget.TextView
 class TikTokBottomSheet(
     private val activity: Activity,
     private val previewBitmap: Bitmap?,
-    private val onSaveWebm: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
     private val onSaveOriginalWebp: () -> Unit,
-    private val onSaveGif: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
+    private val onSendToTelegramBot: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
+    private val onSaveWebm: (updateStatus: (String) -> Unit, onFinish: () -> Unit) -> Unit,
     private val onCopyUrl: () -> Unit
 ) {
 
@@ -153,7 +153,7 @@ class TikTokBottomSheet(
             bottomMargin = dp(10f)
         })
 
-        // Khung trạng thái loading khi đang convert
+        // Khung trạng thái loading khi đang xử lý
         val progressLayout = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -180,13 +180,42 @@ class TikTokBottomSheet(
         })
 
         // 3. Danh sách Action Items
-        // Action 1: Lưu Video Sticker Telegram (.webm)
-        val webmItem = createActionRow(
+        // Action 1: Lưu Sticker gốc (.webp)
+        val webpItem = createActionRow(
+            badgeBgColor = "#2A1620",
+            badgeTextColor = "#FE2C55",
+            badgeGlyph = "↓",
+            title = "Lưu Sticker (.webp)",
+            desc = "Tải file WebP gốc vào máy (Pictures/TikTokStickers)"
+        ) {
+            dialog.dismiss()
+            onSaveOriginalWebp()
+        }
+        sheetCard.addView(webpItem)
+
+        // Action 2: Gửi vào @VideoStickerzBot trên Telegram
+        val teleBotItem = createActionRow(
             badgeBgColor = "#142536",
             badgeTextColor = "#2AABEE",
+            badgeGlyph = "➤",
+            title = "Gửi vào @VideoStickerzBot",
+            desc = "Gửi sang Telegram bot để tự động tạo video sticker"
+        ) {
+            progressLayout.visibility = View.VISIBLE
+            onSendToTelegramBot(
+                { status -> activity.runOnUiThread { progressText.text = status } },
+                { dialog.dismiss() }
+            )
+        }
+        sheetCard.addView(teleBotItem)
+
+        // Action 3: Lưu Video Sticker Telegram (.webm VP9 512px)
+        val webmItem = createActionRow(
+            badgeBgColor = "#1B2836",
+            badgeTextColor = "#3897F0",
             badgeGlyph = "▶",
             title = "Lưu Video Sticker (.webm)",
-            desc = "Convert sang WebM VP9 (chuẩn 512px cho Telegram)"
+            desc = "Tự convert sang WebM VP9 (chuẩn 512px cho Telegram)"
         ) {
             progressLayout.visibility = View.VISIBLE
             onSaveWebm(
@@ -195,35 +224,6 @@ class TikTokBottomSheet(
             )
         }
         sheetCard.addView(webmItem)
-
-        // Action 2: Lưu Sticker gốc (.webp)
-        val webpItem = createActionRow(
-            badgeBgColor = "#2A1620",
-            badgeTextColor = "#FE2C55",
-            badgeGlyph = "↓",
-            title = "Lưu Sticker gốc (.webp)",
-            desc = "Tải file WebP nguyên bản từ CDN TikTok"
-        ) {
-            dialog.dismiss()
-            onSaveOriginalWebp()
-        }
-        sheetCard.addView(webpItem)
-
-        // Action 3: Lưu ảnh động GIF (.gif)
-        val gifItem = createActionRow(
-            badgeBgColor = "#132729",
-            badgeTextColor = "#25F4EE",
-            badgeGlyph = "🎞",
-            title = "Lưu ảnh động (.gif)",
-            desc = "Chuyển thành ảnh GIF động lặp vô tận"
-        ) {
-            progressLayout.visibility = View.VISIBLE
-            onSaveGif(
-                { status -> activity.runOnUiThread { progressText.text = status } },
-                { dialog.dismiss() }
-            )
-        }
-        sheetCard.addView(gifItem)
 
         // Action 4: Sao chép URL
         val copyItem = createActionRow(
