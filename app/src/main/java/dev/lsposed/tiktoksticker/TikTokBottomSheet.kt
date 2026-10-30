@@ -193,13 +193,13 @@ class TikTokBottomSheet(
         }
         sheetCard.addView(webpItem)
 
-        // Action 2: Gửi vào @VideoStickerzBot trên Telegram
-        val teleBotItem = createActionRow(
+        // Action 2: Chia sẻ sticker (WebP)
+        val shareItem = createActionRow(
             badgeBgColor = "#142536",
             badgeTextColor = "#2AABEE",
             badgeGlyph = "➤",
-            title = "Gửi vào @VideoStickerzBot",
-            desc = "Gửi sang Telegram bot để tự động tạo video sticker"
+            title = "Chia sẻ sticker",
+            desc = "Chia sẻ qua Telegram, Nekogram hoặc ứng dụng khác"
         ) {
             progressLayout.visibility = View.VISIBLE
             onSendToTelegramBot(
@@ -207,7 +207,7 @@ class TikTokBottomSheet(
                 { dialog.dismiss() }
             )
         }
-        sheetCard.addView(teleBotItem)
+        sheetCard.addView(shareItem)
 
         // Action 3: Lưu Video Sticker Telegram (.webm VP9 512px)
         val webmItem = createActionRow(

@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -26,6 +27,7 @@ import kotlin.math.min
  * - Tốc độ khung hình: Tối đa 30 FPS
  * - Thời lượng: Tối đa 3.0 giây
  * - Bitrate: 256 kbps (đảm bảo dung lượng file luôn < 256 KB theo chuẩn Telegram)
+ * - Xử lý compositing chính xác từng frame WebP và xử lý nền sạch sẽ.
  */
 object WebpToWebmConverter {
 
@@ -59,30 +61,30 @@ object WebpToWebmConverter {
                 return false
             }
 
-            val width = invokeInt(webpImage, "getWidth")
-            val height = invokeInt(webpImage, "getHeight")
+            val canvasWidth = invokeInt(webpImage, "getWidth")
+            val canvasHeight = invokeInt(webpImage, "getHeight")
             val frameCount = invokeInt(webpImage, "getFrameCount")
             val durations = invokeIntArray(webpImage, "getFrameDurations")
                 ?: IntArray(frameCount) { 60 }
 
-            if (frameCount <= 0 || width <= 0 || height <= 0) {
-                log("Invalid dimensions for WebM: ${width}x$height, $frameCount frames")
+            if (frameCount <= 0 || canvasWidth <= 0 || canvasHeight <= 0) {
+                log("Invalid dimensions for WebM: ${canvasWidth}x$canvasHeight, $frameCount frames")
                 runCatching { invokeVoid(webpImage, "dispose") }
                 return false
             }
 
             // Tính toán kích thước chuẩn Telegram (cạnh lớn 512px, chia hết cho 16)
-            val (outW, outH) = if (width >= height) {
+            val (outW, outH) = if (canvasWidth >= canvasHeight) {
                 val w = TARGET_MAX_DIM
-                val h = (((TARGET_MAX_DIM.toDouble() * height / width).toInt() / 16) * 16).coerceAtLeast(16)
+                val h = (((TARGET_MAX_DIM.toDouble() * canvasHeight / canvasWidth).toInt() / 16) * 16).coerceAtLeast(16)
                 w to h
             } else {
                 val h = TARGET_MAX_DIM
-                val w = (((TARGET_MAX_DIM.toDouble() * width / height).toInt() / 16) * 16).coerceAtLeast(16)
+                val w = (((TARGET_MAX_DIM.toDouble() * canvasWidth / canvasHeight).toInt() / 16) * 16).coerceAtLeast(16)
                 w to h
             }
 
-            log("Converting WebP to WebM VP9: ${width}x$height ($frameCount frames) -> ${outW}x$outH")
+            log("Converting WebP to WebM VP9: ${canvasWidth}x$canvasHeight ($frameCount frames) -> ${outW}x$outH")
 
             // Tìm encoder VP9 (hoặc fallback VP8)
             val mimeType = MediaFormat.MIMETYPE_VIDEO_VP9
@@ -152,17 +154,31 @@ object WebpToWebmConverter {
                 }
             }
 
-            val rawBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val rawCanvas = Canvas(rawBitmap)
+            // Canvas tích lũy toàn bộ khung hình ảnh động (Full Canvas)
+            val canvasBitmap = Bitmap.createBitmap(canvasWidth, canvasHeight, Bitmap.Config.ARGB_8888)
+            val mainCanvas = Canvas(canvasBitmap)
+
+            // Bitmap xuất ra 512px
             val scaledBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
             val scaledCanvas = Canvas(scaledBitmap)
+
             val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-            val srcRect = Rect(0, 0, width, height)
+            val clearPaint = Paint().apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+            }
+
+            val srcRect = Rect(0, 0, canvasWidth, canvasHeight)
             val dstRect = Rect(0, 0, outW, outH)
             val argbPixels = IntArray(outW * outH)
 
             var ptsUs = 0L
             var encodedFramesCount = 0
+
+            var prevDisposeToBackground = false
+            var prevFrameX = 0
+            var prevFrameY = 0
+            var prevFrameW = 0
+            var prevFrameH = 0
 
             for (i in 0 until frameCount) {
                 if (ptsUs >= MAX_DURATION_US) {
@@ -172,14 +188,55 @@ object WebpToWebmConverter {
 
                 val frame = invokeFrame(webpImage, i) ?: continue
 
-                // Render frame gốc
-                rawCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                val rendered = renderFrame(frame, width, height, rawBitmap)
-                if (!rendered) continue
+                val fW = invokeInt(frame, "getWidth").takeIf { it > 0 } ?: canvasWidth
+                val fH = invokeInt(frame, "getHeight").takeIf { it > 0 } ?: canvasHeight
+                val fX = invokeInt(frame, "getXOffset")
+                val fY = invokeInt(frame, "getYOffset")
+                val shouldBlend = invokeBoolean(frame, "shouldBlendWithPreviousFrame") ?: true
+                val disposeToBg = invokeBoolean(frame, "shouldDisposeToBackgroundColor") ?: false
 
-                // Vẽ scale lên kích thước 512px
+                // 1. Áp dụng disposal của frame trước đó nếu cần
+                if (prevDisposeToBackground) {
+                    mainCanvas.drawRect(
+                        prevFrameX.toFloat(),
+                        prevFrameY.toFloat(),
+                        (prevFrameX + prevFrameW).toFloat(),
+                        (prevFrameY + prevFrameH).toFloat(),
+                        clearPaint
+                    )
+                }
+
+                // 2. Nếu frame hiện tại không blend (overwrite), xóa vùng của frame hiện tại trước khi vẽ
+                if (!shouldBlend) {
+                    mainCanvas.drawRect(
+                        fX.toFloat(),
+                        fY.toFloat(),
+                        (fX + fW).toFloat(),
+                        (fY + fH).toFloat(),
+                        clearPaint
+                    )
+                }
+
+                // 3. Render frame con vào patchBitmap
+                val patchBitmap = Bitmap.createBitmap(fW, fH, Bitmap.Config.ARGB_8888)
+                val rendered = renderFrame(frame, fW, fH, patchBitmap)
+
+                if (rendered) {
+                    // Vẽ patch lên đúng toạ độ (fX, fY) trên mainCanvas
+                    mainCanvas.drawBitmap(patchBitmap, fX.toFloat(), fY.toFloat(), paint)
+                }
+                patchBitmap.recycle()
+                runCatching { invokeVoid(frame, "dispose") }
+
+                prevDisposeToBackground = disposeToBg
+                prevFrameX = fX
+                prevFrameY = fY
+                prevFrameW = fW
+                prevFrameH = fH
+
+                // 4. Scale lên kích thước 512px
                 scaledCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                scaledCanvas.drawBitmap(rawBitmap, srcRect, dstRect, paint)
+                scaledCanvas.drawBitmap(canvasBitmap, srcRect, dstRect, paint)
 
                 scaledBitmap.getPixels(argbPixels, 0, outW, 0, 0, outW, outH)
                 val yuvData = if (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) {
@@ -225,6 +282,9 @@ object WebpToWebmConverter {
             runCatching { muxer.release() }
             runCatching { invokeVoid(webpImage, "dispose") }
 
+            canvasBitmap.recycle()
+            scaledBitmap.recycle()
+
             val success = outputFile.exists() && outputFile.length() > 500
             log("WebM conversion finished: frames=$encodedFramesCount size=${outputFile.length()} bytes, success=$success")
             success
@@ -236,7 +296,7 @@ object WebpToWebmConverter {
     }
 
     // =========================================================================
-    // COLOR FORMAT & YUV CONVERSION (BT.601)
+    // COLOR FORMAT & YUV CONVERSION (BT.601 VỚI XỬ LÝ ALPHA SẠCH SẼ)
     // =========================================================================
 
     private fun selectColorFormat(codec: MediaCodec, mimeType: String): Int {
@@ -253,6 +313,8 @@ object WebpToWebmConverter {
 
     /**
      * Chuyển đổi ARGB sang I420 (YUV420Planar: Y plane, rồi U plane, rồi V plane)
+     * Đối với pixel có độ trong suốt (alpha < 255), ta pha trộn nhẹ lên nền trong suốt sạch (Alpha-matting)
+     * để tránh sinh ra khối pixel đen rác (macroblocks).
      */
     private fun argbToI420(argb: IntArray, width: Int, height: Int): ByteArray {
         val ySize = width * height
@@ -266,9 +328,27 @@ object WebpToWebmConverter {
         for (j in 0 until height) {
             for (i in 0 until width) {
                 val c = argb[j * width + i]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
+                val a = (c ushr 24) and 0xFF
+                val r: Int
+                val g: Int
+                val b: Int
+
+                if (a == 0) {
+                    // Pixel hoàn toàn trong suốt -> Gán giá trị YUV sạch
+                    r = 0
+                    g = 0
+                    b = 0
+                } else if (a < 255) {
+                    // Pha trộn alpha với nền
+                    val normA = a / 255.0f
+                    r = (((c shr 16) and 0xFF) * normA).toInt()
+                    g = (((c shr 8) and 0xFF) * normA).toInt()
+                    b = ((c and 0xFF) * normA).toInt()
+                } else {
+                    r = (c shr 16) and 0xFF
+                    g = (c shr 8) and 0xFF
+                    b = c and 0xFF
+                }
 
                 val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
                 out[yIdx++] = max(0, min(255, y)).toByte()
@@ -297,9 +377,25 @@ object WebpToWebmConverter {
         for (j in 0 until height) {
             for (i in 0 until width) {
                 val c = argb[j * width + i]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
+                val a = (c ushr 24) and 0xFF
+                val r: Int
+                val g: Int
+                val b: Int
+
+                if (a == 0) {
+                    r = 0
+                    g = 0
+                    b = 0
+                } else if (a < 255) {
+                    val normA = a / 255.0f
+                    r = (((c shr 16) and 0xFF) * normA).toInt()
+                    g = (((c shr 8) and 0xFF) * normA).toInt()
+                    b = ((c and 0xFF) * normA).toInt()
+                } else {
+                    r = (c shr 16) and 0xFF
+                    g = (c shr 8) and 0xFF
+                    b = c and 0xFF
+                }
 
                 val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
                 out[yIdx++] = max(0, min(255, y)).toByte()
@@ -369,11 +465,21 @@ object WebpToWebmConverter {
     }
 
     private fun invokeInt(target: Any, methodName: String): Int {
-        return (findMethod(target.javaClass, methodName).invoke(target) as? Int) ?: 0
+        return runCatching {
+            (findMethod(target.javaClass, methodName).invoke(target) as? Int) ?: 0
+        }.getOrDefault(0)
+    }
+
+    private fun invokeBoolean(target: Any, methodName: String): Boolean? {
+        return runCatching {
+            findMethod(target.javaClass, methodName).invoke(target) as? Boolean
+        }.getOrNull()
     }
 
     private fun invokeIntArray(target: Any, methodName: String): IntArray? {
-        return findMethod(target.javaClass, methodName).invoke(target) as? IntArray
+        return runCatching {
+            findMethod(target.javaClass, methodName).invoke(target) as? IntArray
+        }.getOrNull()
     }
 
     private fun invokeVoid(target: Any, methodName: String) {

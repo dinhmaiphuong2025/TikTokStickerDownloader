@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">TikTok Sticker Downloader</string>
-    <string name="xposed_description">Tải sticker WebP từ bình luận TikTok, gửi thẳng @VideoStickerzBot hoặc lưu WebM VP9</string>
+    <string name="xposed_description">Tải sticker WebP từ bình luận TikTok, chia sẻ trực tiếp hoặc lưu Video Sticker WebM VP9</string>
 </resources>

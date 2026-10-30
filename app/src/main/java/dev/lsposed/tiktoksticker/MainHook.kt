@@ -682,22 +682,13 @@ class MainHook : IXposedHookLoadPackage {
                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
                     type = mimeType
                     putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(Intent.EXTRA_TEXT, "@VideoStickerzBot")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
                     clipData = ClipData.newRawUri("sticker", uri)
                 }
 
-                val telegramPkg = resolveTelegramPackage(activity)
-                if (telegramPkg != null) {
-                    sendIntent.setPackage(telegramPkg)
-                    showToast(activity, "Mở Telegram: Chọn @VideoStickerzBot để bot tạo sticker!")
-                    activity.startActivity(sendIntent)
-                } else {
-                    val chooser = Intent.createChooser(sendIntent, "Gửi vào @VideoStickerzBot qua...")
-                    chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    showToast(activity, "Chọn ứng dụng Telegram gửi cho @VideoStickerzBot")
-                    activity.startActivity(chooser)
-                }
+                val chooser = Intent.createChooser(sendIntent, "Chia sẻ sticker qua...")
+                chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                activity.startActivity(chooser)
             }.onFailure { err ->
                 log("Failed to share to Telegram: ${err.message}")
                 // Fallback mở thẳng chat bot bằng URL deeplink
