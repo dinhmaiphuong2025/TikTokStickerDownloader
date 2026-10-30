@@ -15,9 +15,9 @@ import android.graphics.drawable.ShapeDrawable
 import android.graphics.drawable.StateListDrawable
 import android.graphics.drawable.shapes.PathShape
 import android.os.Build
-import android.util.PathParser
 import android.util.TypedValue
 import android.view.Gravity
+import androidx.core.graphics.PathParser
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
