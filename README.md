@@ -1,45 +1,37 @@
 # TikTok Sticker Downloader
 
-Module LSPosed hỗ trợ tải sticker trực tiếp từ phần bình luận của TikTok, giữ nguyên định dạng chất lượng cao hoặc chuyển đổi sang Video Sticker chuẩn Telegram (WebM VP9).
+Module LSPosed giúp tải sticker và ảnh động trong phần bình luận của TikTok, hỗ trợ lưu file gốc hoặc chuyển đổi sang WebM để làm video sticker trên Telegram.
 
-## Tính năng chính
+## Tính năng
 
-- **Bắt sticker chuẩn xác:** Hook vào thư viện nạp ảnh nội bộ (ByteDance Lighten / SmartImageView) và phát hiện cử chỉ nhấn giữ (long-press) không làm ảnh hưởng đến thao tác vuốt cuộn màn hình bình luận.
-- **Giao diện chuẩn TikTok Tux Design:** BottomSheet tông nền Dark Obsidian (`#161823`), bo góc 16dp, drag handle pill và hệ thống icon Vector SVG phẳng sắc nét (không dùng emoji).
-- **Hỗ trợ định dạng gốc linh hoạt:**
-  - Tự nhận diện và lưu đúng định dạng của sticker: Animated WebP, Static WebP, PNG, JPG, GIF.
-  - Lưu vào thư mục công khai `Pictures/TikTokStickers/` và tự động cập nhật thư viện qua MediaStore.
-- **Tự động chuyển đổi Video Sticker Telegram:**
-  - Chuyển Animated WebP sang **WebM VP9** (độ phân giải chuẩn cạnh 512px, tốc độ khung hình 30 FPS, thời lượng tối đa 3.0s, bitrate 256 kbps).
-  - Khử artifact mảng đen khi chuyển đổi sang định dạng video bằng thuật toán compositing chuẩn (kế thừa toạ độ frame con `xOffset`, `yOffset`, xử lý cờ hòa trộn `blendWithPreviousFrame` và `disposeToBackgroundColor`).
-- **Gửi thẳng sang Telegram:**
-  - Nút **"Gửi WebM vào Telegram (Bot)"** mở thẳng ứng dụng Telegram/Nekogram để bạn chọn gửi trực tiếp cho `@VideoStickerzBot` (hoặc bot sticker bất kỳ) tạo sticker tức thì.
-  - Sử dụng Content URI MediaStore kèm cờ cấp quyền đọc xuyên tiến trình (`FLAG_GRANT_READ_URI_PERMISSION`), không bị lỗi quyền Linux UID.
+- **Nhấn giữ để tải:** Nhấn giữ vào bất kỳ sticker nào trong mục bình luận để mở menu thao tác (không bị kẹt cử chỉ vuốt).
+- **Lưu file gốc:** Tự động nhận diện định dạng từ CDN (WebP động, WebP tĩnh, PNG, JPG, GIF) và lưu vào `Pictures/TikTokStickers/`.
+- **Chuyển đổi WebM VP9:** Tự render từng khung hình WebP sang video WebM theo đúng chuẩn Video Sticker của Telegram (tối đa 512px, 30 FPS, thời lượng dưới 3s).
+- **Gửi nhanh sang Telegram:** Mở trực tiếp Telegram/Nekogram kèm file WebM để gửi cho các bot tạo sticker (như `@VideoStickerzBot`).
+- **Giao diện đồng bộ:** Thiết kế dạng BottomSheet tối màu theo phong cách của TikTok, sử dụng vector icon.
 
-## Yêu cầu hệ thống
+## Hỗ trợ
 
-- Android 8.0 (API 26) trở lên.
-- Root với Magisk / KernelSU / APatch.
-- Framework Zygisk-LSPosed (hoặc phiên bản LSPosed tương thích).
-- Ứng dụng TikTok mục tiêu:
-  - `com.ss.android.ugc.trill` (TikTok Châu Á / Việt Nam)
-  - `com.zhiliaoapp.musically` (TikTok Quốc tế)
+- Đã test trên các bản TikTok:
+  - `com.ss.android.ugc.trill` (TikTok Việt Nam / Châu Á)
+  - `com.zhiliaoapp.musically` (TikTok Global)
+- Yêu cầu thiết bị đã cài LSPosed (Zygisk).
 
-## Cài đặt & Sử dụng
+## Hướng dẫn sử dụng
 
-1. Tải file APK mới nhất từ mục **Releases** hoặc artifact từ **GitHub Actions**.
-2. Cài đặt APK vào thiết bị.
-3. Mở ứng dụng **LSPosed Manager**, kích hoạt module **TikTok Sticker Downloader** và chọn phạm vi hoạt động là ứng dụng TikTok.
-4. Buộc dừng (Force stop) TikTok rồi mở lại.
-5. Vào bất kỳ bình luận nào có sticker, **nhấn giữ** vào sticker để mở menu tùy chọn tải về hoặc chia sẻ.
+1. Tải APK từ mục [Releases](../../releases) hoặc tab [Actions](../../actions) rồi cài vào máy.
+2. Bật module trong LSPosed, tích chọn ứng dụng TikTok trong danh sách scope.
+3. Buộc dừng TikTok rồi mở lại.
+4. Mở một video bất kỳ, vào phần bình luận có sticker và nhấn giữ vào sticker để chọn thao tác.
 
-## Build từ mã nguồn
+## Build
 
-Dự án sử dụng Gradle 8.8+ và Android Gradle Plugin 8.8.0:
+Yêu cầu JDK 17:
 
 ```bash
-chmod +x gradlew
+git clone https://github.com/dinhmaiphuong2025/TikTokStickerDownloader.git
+cd TikTokStickerDownloader
 ./gradlew assembleDebug
 ```
 
-File APK sau khi build nằm tại `app/build/outputs/apk/debug/app-debug.apk`.
+File APK xuất ra tại: `app/build/outputs/apk/debug/app-debug.apk`.
