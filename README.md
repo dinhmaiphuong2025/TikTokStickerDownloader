@@ -24,14 +24,3 @@ Module LSPosed giúp tải sticker và ảnh động trong phần bình luận c
 3. Buộc dừng TikTok rồi mở lại.
 4. Mở một video bất kỳ, vào phần bình luận có sticker và nhấn giữ vào sticker để chọn thao tác.
 
-## Build
-
-Yêu cầu JDK 17:
-
-```bash
-git clone https://github.com/dinhmaiphuong2025/TikTokStickerDownloader.git
-cd TikTokStickerDownloader
-./gradlew assembleDebug
-```
-
-File APK xuất ra tại: `app/build/outputs/apk/debug/app-debug.apk`.
