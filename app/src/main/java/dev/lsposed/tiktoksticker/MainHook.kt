@@ -65,12 +65,20 @@ class MainHook : IXposedHookLoadPackage {
 
         // Các package Telegram family (ưu tiên Nekogram vì người dùng đang dùng)
         private val TELEGRAM_PACKAGES = listOf(
-            "tw.nekomimi.nekogram",           // Nekogram
-            "org.telegram.messenger",         // Telegram chính thức
-            "org.telegram.messenger.web",     // Telegram direct APK
+            "tw.nekomimi.nekogram",           // Nekogram Play / GitHub
+            "tw.nekomimi.nekogram.fdroid",    // Nekogram F-Droid
+            "org.telegram.messenger",         // Telegram chính thức (Play Store)
+            "org.telegram.messenger.web",     // Telegram Direct APK
+            "org.telegram.messenger.beta",    // Telegram Beta
             "org.telegram.plus",              // Plus Messenger
             "nekox.messenger",                // NekoX
-            "org.thunderdog.challegram"       // Telegram X
+            "xyz.nextalone.nagram",           // Nagram
+            "org.thunderdog.challegram",      // Telegram X
+            "com.iMe.android",                // iMe Messenger
+            "org.forkclient.messenger",       // ForkClient
+            "com.exteragram.messenger",       // ExteraGram
+            "com.cherrygram.messenger",       // CherryGram
+            "org.ayugram.messenger"           // AyuGram
         )
 
         // Bộ nhớ đệm WeakHashMap để tránh memory leak
@@ -375,9 +383,26 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun isStickerCandidate(view: View, url: String): Boolean {
+        // 1. Kiểm tra kích thước view: Sticker trong bình luận luôn có kích thước nhỏ
+        val dm = view.resources.displayMetrics
+        val maxStickerPx = (280 * dm.density).toInt().coerceAtLeast(500)
+        val w = view.width
+        val h = view.height
+        if (w > maxStickerPx || h > maxStickerPx) return false
+        if (w >= (dm.widthPixels * 0.65f).toInt() || h >= (dm.heightPixels * 0.4f).toInt()) return false
+        if (w < 20 || h < 20) return false
+
+        // 2. Kiểm tra URL
         val lowerUrl = url.lowercase()
         if (!lowerUrl.startsWith("http")) return false
-        if (lowerUrl.contains("avatar") || lowerUrl.contains("/user/")) return false
+
+        // Loại trừ avatar, video cover, feed poster, livestream, music
+        if (lowerUrl.contains("avatar") || lowerUrl.contains("/user/") ||
+            lowerUrl.contains("cover") || lowerUrl.contains("video_cover") ||
+            lowerUrl.contains("tiktok-play") || lowerUrl.contains("/play/") ||
+            lowerUrl.contains("music") || lowerUrl.contains("sound") ||
+            lowerUrl.contains("feed") || lowerUrl.contains("stream")
+        ) return false
 
         val isCdn = lowerUrl.contains("tiktokcdn") ||
                 lowerUrl.contains("byteimg") ||
@@ -385,11 +410,11 @@ class MainHook : IXposedHookLoadPackage {
                 lowerUrl.contains("byteoversea") ||
                 lowerUrl.contains("tiktok")
 
-        val isImageFormat = lowerUrl.contains(".webp") ||
+        if (!isCdn) return false
+
+        val isStickerFormat = lowerUrl.contains(".webp") ||
                 lowerUrl.contains(".gif") ||
-                lowerUrl.contains(".png") ||
-                lowerUrl.contains(".jpeg") ||
-                lowerUrl.contains(".jpg")
+                lowerUrl.contains(".png")
 
         val isStickerKeyword = lowerUrl.contains("sticker") ||
                 lowerUrl.contains("emoji") ||
@@ -397,7 +422,7 @@ class MainHook : IXposedHookLoadPackage {
                 lowerUrl.contains("animate") ||
                 lowerUrl.contains("comment")
 
-        return isCdn || isImageFormat || isStickerKeyword
+        return isStickerFormat || isStickerKeyword
     }
 
     // =========================================================================
@@ -569,28 +594,21 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 updateStatus("Đang convert sang WebM VP9 512px...")
-                val targetDir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                    "TikTokStickers"
-                )
-                if (!targetDir.exists()) targetDir.mkdirs()
-
-                val baseName = "sticker_${System.currentTimeMillis()}"
-                val webmFile = File(targetDir, "$baseName.webm")
+                val tempWebm = File(activity.cacheDir, "temp_save_${System.currentTimeMillis()}.webm")
                 val cl = appClassLoader ?: activity.classLoader
 
-                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, webmFile, cl)
-                if (ok && webmFile.exists() && webmFile.length() > 500) {
-                    MediaScannerConnection.scanFile(
-                        activity,
-                        arrayOf(webmFile.absolutePath),
-                        arrayOf("video/webm"),
-                        null
-                    )
-                    showToast(activity, "Đã lưu Video Sticker: ${webmFile.name}")
+                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, tempWebm, cl)
+                if (ok && tempWebm.exists() && tempWebm.length() > 500) {
+                    val uri = saveStickerAndGetUri(activity, tempWebm.readBytes(), "webm")
+                    tempWebm.delete()
+                    if (uri != null) {
+                        showToast(activity, "Đã lưu Video Sticker vào Pictures/TikTokStickers!")
+                    } else {
+                        showToast(activity, "Không thể lưu video vào máy")
+                    }
                 } else {
-                    webmFile.delete()
-                    showToast(activity, "Không thể convert sang WebM, vui lòng lưu WebP gốc")
+                    tempWebm.delete()
+                    showToast(activity, "Không thể convert sang WebM, vui lòng lưu sticker gốc")
                 }
                 activity.runOnUiThread { onFinish() }
             }.onFailure { err ->
@@ -602,7 +620,7 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     /**
-     * 4. Gửi file WebM sang Telegram (Nekogram / Telegram chooser) để bot tạo Video Sticker
+     * 4. Gửi file WebM sang Telegram (Nekogram / Telegram direct) để bot tạo Video Sticker
      */
     private fun executeShareWebmToTelegram(
         activity: Activity,
@@ -620,27 +638,25 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 updateStatus("Đang convert sang WebM VP9 512px...")
-                val targetDir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                    "TikTokStickers"
-                )
-                if (!targetDir.exists()) targetDir.mkdirs()
-
-                val baseName = "sticker_${System.currentTimeMillis()}"
-                val webmFile = File(targetDir, "$baseName.webm")
+                val tempWebm = File(activity.cacheDir, "temp_share_${System.currentTimeMillis()}.webm")
                 val cl = appClassLoader ?: activity.classLoader
 
-                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, webmFile, cl)
-                if (ok && webmFile.exists() && webmFile.length() > 500) {
-                    val uri = saveStickerAndGetUri(activity, webmFile.readBytes(), "webm")
-                        ?: resolveShareableUri(activity, webmFile)
+                val ok = WebpToWebmConverter.convertWebpToWebm(bytes, tempWebm, cl)
+                if (ok && tempWebm.exists() && tempWebm.length() > 500) {
+                    val uri = saveStickerAndGetUri(activity, tempWebm.readBytes(), "webm")
+                    tempWebm.delete()
 
-                    activity.runOnUiThread {
-                        onFinish()
-                        shareFileToTelegramDirect(activity, uri, "webm")
+                    if (uri != null) {
+                        activity.runOnUiThread {
+                            onFinish()
+                            shareFileToTelegramDirect(activity, uri, "webm")
+                        }
+                    } else {
+                        showToast(activity, "Không thể tạo file WebM để gửi")
+                        activity.runOnUiThread { onFinish() }
                     }
                 } else {
-                    webmFile.delete()
+                    tempWebm.delete()
                     showToast(activity, "Không thể convert WebM để gửi")
                     activity.runOnUiThread { onFinish() }
                 }
@@ -679,11 +695,7 @@ class MainHook : IXposedHookLoadPackage {
                 } else {
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 }
-                val relativeDir = if (mimeType.startsWith("video/")) {
-                    Environment.DIRECTORY_MOVIES + "/TikTokStickers"
-                } else {
-                    Environment.DIRECTORY_PICTURES + "/TikTokStickers"
-                }
+                val relativeDir = Environment.DIRECTORY_PICTURES + "/TikTokStickers"
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
@@ -735,17 +747,6 @@ class MainHook : IXposedHookLoadPackage {
         }.getOrNull()
     }
 
-    private fun resolveTelegramPackage(context: Context): String? {
-        val pm = context.packageManager
-        for (pkg in TELEGRAM_PACKAGES) {
-            runCatching {
-                pm.getPackageInfo(pkg, 0)
-                return pkg
-            }
-        }
-        return null
-    }
-
     private fun shareFileToTelegramDirect(activity: Activity, uri: Uri, extension: String) {
         activity.runOnUiThread {
             runCatching {
@@ -757,18 +758,27 @@ class MainHook : IXposedHookLoadPackage {
                     else -> "image/webp"
                 }
 
-                val targetPackage = resolveTelegramPackage(activity)
-                if (targetPackage != null) {
-                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                        type = mimeType
-                        setPackage(targetPackage)
-                        putExtra(Intent.EXTRA_STREAM, uri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
-                        clipData = ClipData.newRawUri("sticker", uri)
+                var launched = false
+                // Khởi chạy trực tiếp bằng cách thử từng package (tránh NameNotFoundException do Package Visibility trên Android 11+)
+                for (pkg in TELEGRAM_PACKAGES) {
+                    try {
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = mimeType
+                            setPackage(pkg)
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                            clipData = ClipData.newRawUri("sticker", uri)
+                        }
+                        activity.startActivity(sendIntent)
+                        launched = true
+                        break
+                    } catch (e: Exception) {
+                        // Package này không cài hoặc không tương thích, tiếp tục thử package kế tiếp
                     }
-                    activity.startActivity(sendIntent)
-                } else {
-                    // Fallback sang chooser nếu không phát hiện được client Telegram nào
+                }
+
+                if (!launched) {
+                    // Nếu không có client Telegram nào mở được trực tiếp, mở chooser để người dùng tự chọn
                     shareFileToChooser(activity, uri, extension)
                 }
             }.onFailure { err ->
