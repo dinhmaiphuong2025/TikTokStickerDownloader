@@ -3,6 +3,7 @@ package dev.lsposed.tiktoksticker
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
@@ -685,17 +686,23 @@ class MainHook : IXposedHookLoadPackage {
             "jpg", "jpeg" -> "image/jpeg"
             else -> "image/webp"
         }
+        val isVideo = mimeType.startsWith("video/")
         val fileName = "sticker_${System.currentTimeMillis()}.$extension"
 
         // 1. Ghi qua MediaStore ContentResolver (chuẩn Android 10+ / Q trở lên)
+        // Lưu ý: Android MediaStore quy định video CHỈ được lưu trong Movies hoặc DCIM, còn ảnh lưu trong Pictures hoặc DCIM.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val mediaStoreUri = runCatching {
-                val collection = if (mimeType.startsWith("video/")) {
+                val collection = if (isVideo) {
                     MediaStore.Video.Media.EXTERNAL_CONTENT_URI
                 } else {
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 }
-                val relativeDir = Environment.DIRECTORY_PICTURES + "/TikTokStickers"
+                val relativeDir = if (isVideo) {
+                    Environment.DIRECTORY_MOVIES + "/TikTokStickers"
+                } else {
+                    Environment.DIRECTORY_PICTURES + "/TikTokStickers"
+                }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
@@ -719,12 +726,14 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // 2. Fallback cho Android 9 trở xuống hoặc khi MediaStore insert trả về null
-        return runCatching {
-            val targetDir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                "TikTokStickers"
-            )
+        // 2. Fallback cho Android 9 trở xuống hoặc khi MediaStore insert bị từ chối
+        val externalUri = runCatching {
+            val parentDir = if (isVideo) {
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+            } else {
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+            }
+            val targetDir = File(parentDir, "TikTokStickers")
             if (!targetDir.exists()) targetDir.mkdirs()
 
             val file = File(targetDir, fileName)
@@ -745,6 +754,17 @@ class MainHook : IXposedHookLoadPackage {
 
             scannedUri ?: resolveShareableUri(context, file)
         }.getOrNull()
+
+        if (externalUri != null) {
+            return externalUri
+        }
+
+        // 3. Fallback cuối cùng: Lưu tạm trong cacheDir của app rồi lấy Shareable URI (đảm bảo luôn có URI gửi đi)
+        return runCatching {
+            val cacheFile = File(context.cacheDir, "share_${System.currentTimeMillis()}.$extension")
+            cacheFile.writeBytes(bytes)
+            resolveShareableUri(context, cacheFile)
+        }.getOrNull()
     }
 
     private fun shareFileToTelegramDirect(activity: Activity, uri: Uri, extension: String) {
@@ -759,21 +779,45 @@ class MainHook : IXposedHookLoadPackage {
                 }
 
                 var launched = false
-                // Khởi chạy trực tiếp bằng cách thử từng package (tránh NameNotFoundException do Package Visibility trên Android 11+)
+                // Khởi chạy trực tiếp: Dùng Explicit Intent (chỉ định rõ LaunchActivity)
+                // để bypass hoàn toàn cơ chế lọc Package Visibility trên Android 11+
                 for (pkg in TELEGRAM_PACKAGES) {
+                    val activityClass = if (pkg == "org.thunderdog.challegram") {
+                        "org.thunderdog.challegram.MainActivity"
+                    } else {
+                        "org.telegram.ui.LaunchActivity"
+                    }
+
+                    // Bước 1: Thử Explicit Intent với ComponentName (vượt qua bộ lọc <queries>)
                     try {
-                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        val explicitIntent = Intent(Intent.ACTION_SEND).apply {
                             type = mimeType
-                            setPackage(pkg)
+                            component = ComponentName(pkg, activityClass)
                             putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
                             clipData = ClipData.newRawUri("sticker", uri)
                         }
-                        activity.startActivity(sendIntent)
+                        activity.startActivity(explicitIntent)
                         launched = true
                         break
                     } catch (e: Exception) {
-                        // Package này không cài hoặc không tương thích, tiếp tục thử package kế tiếp
+                        // Bước 2: Thử Package Intent thông thường
+                        try {
+                            val packageIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = mimeType
+                                setPackage(pkg)
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                                clipData = ClipData.newRawUri("sticker", uri)
+                            }
+                            activity.startActivity(packageIntent)
+                            launched = true
+                            break
+                        } catch (ignored: Exception) {
+                            // Package này không cài hoặc không khởi chạy được, thử tiếp app kế tiếp
+                        }
                     }
                 }
 
